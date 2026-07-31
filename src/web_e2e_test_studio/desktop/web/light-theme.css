@@ -1,0 +1,271 @@
+:root {
+  color-scheme: light;
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --panel2: #f8f9fb;
+  --line: #dfe3e8;
+  --muted: #687386;
+  --text: #20242c;
+  --accent: #6557d8;
+  --ok: #168f77;
+  --danger: #d84b60;
+}
+
+html,
+body,
+.stage {
+  background: var(--bg);
+}
+
+.topbar,
+.recent,
+.activity,
+.composer-wrap {
+  background: #ffffff;
+}
+
+.quiet,
+.new-test,
+.wide {
+  background: #ffffff;
+}
+
+.quiet:hover,
+.new-test:hover,
+.wide:hover {
+  background: #f5f3ff;
+  border-color: #c9c3f2;
+}
+
+.draft.active {
+  background: #f0eefc;
+}
+
+.recovery-draft {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  padding: 0;
+  border: 1px solid #e2e5ea;
+  background: #fff;
+}
+
+.recovery-open,
+.recovery-discard {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.recovery-open {
+  min-width: 0;
+  padding: 9px;
+  text-align: left;
+}
+
+.recovery-open strong,
+.recovery-open span,
+.recovery-open small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-open span,
+.recovery-open small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.recovery-discard {
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.browser-head {
+  background: #ffffff;
+}
+
+.browser-frame {
+  background:
+    radial-gradient(circle at 50% 35%, #ffffff 0, #f1f3f6 70%);
+}
+
+.browser-empty strong {
+  color: #3a414c;
+}
+
+.browser-icon {
+  color: #9ba4b0;
+}
+
+.bubble {
+  color: #302b55;
+  background: #eeeafd;
+  border-color: #d8d1f7;
+}
+
+.event-card,
+.artifact,
+.capability {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(24 31 43 / 4%);
+}
+
+.step {
+  border-color: #eceef2;
+}
+
+.step-index {
+  color: #087c66;
+  background: #e5f7f2;
+}
+
+.artifact > span {
+  color: #584bc0;
+  background: #eeebff;
+}
+
+.chip {
+  color: #566171;
+  background: #f7f8fa;
+  border-color: #dfe3e8;
+}
+
+.path-picker { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px; }
+.tool-box input,
+dialog input,
+dialog textarea {
+  color: var(--text);
+  background: #ffffff;
+}
+
+.composer {
+  background: #ffffff;
+  border-color: #d6dbe2;
+  box-shadow: 0 10px 30px rgb(33 40 52 / 10%);
+}
+
+.composer:focus-within {
+  border-color: #8d82df;
+  box-shadow:
+    0 0 0 3px rgb(101 87 216 / 10%),
+    0 10px 30px rgb(33 40 52 / 10%);
+}
+
+dialog {
+  color: var(--text);
+  background: #ffffff;
+  border-color: #dfe3e8;
+  box-shadow: 0 24px 80px rgb(23 29 40 / 22%);
+}
+
+dialog::backdrop {
+  background: rgb(37 43 54 / 28%);
+}
+
+.model-current {
+  padding: 9px 10px;
+  color: #4f477f;
+  background: #f0eefc;
+  border: 1px solid #dcd6f8;
+  border-radius: 7px;
+  font-size: 11px;
+}
+
+.security-note {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+/* Keep long Agent/tool records contained inside the activity column. */
+.activity,
+.activity-body,
+.tab-panel,
+.feed {
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.activity {
+  height: 100%;
+  max-height: calc(100vh - 180px);
+  overflow: hidden;
+}
+
+.activity-body {
+  height: auto;
+  overflow: hidden;
+}
+
+.tab-panel {
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.message {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.message.user .bubble {
+  width: fit-content;
+  max-width: 86%;
+}
+
+.event-card {
+  width: 100%;
+  max-width: 100%;
+  overflow: visible;
+}
+
+.event-head {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.event-details {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.event-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.7fr) minmax(0, 1.3fr);
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.event-row span {
+  color: #7b8491;
+  text-transform: capitalize;
+}
+
+.event-row strong {
+  min-width: 0;
+  color: #263140;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.timeline .step {
+  min-width: 0;
+}
+
+.timeline .step > div,
+.timeline .step small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}

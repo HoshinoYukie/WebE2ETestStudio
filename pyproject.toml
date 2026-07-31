@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "web-e2e-test-studio"
+version = "0.1.0"
+description = "VLM-assisted Playwright recording with model-free pytest export"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30,<3",
+    "playwright>=1.50,<2",
+    "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+desktop = [
+    "pywebview>=5,<7",
+]
+dev = [
+    "mypy>=1.10,<2",
+    "pytest>=8,<9",
+    "pytest-cov>=5,<7",
+    "ruff>=0.5,<1",
+]
+
+[project.scripts]
+web-e2e-studio = "web_e2e_test_studio.cli:main"
+web-e2e-desktop = "web_e2e_test_studio.desktop.modern_app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+web_e2e_test_studio = ["desktop/web/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "browser: launches a real Playwright browser and may require installed binaries",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["web_e2e_test_studio"]
+strict = true
+warn_unreachable = true

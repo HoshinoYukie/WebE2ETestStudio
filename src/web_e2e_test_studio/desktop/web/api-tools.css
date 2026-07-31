@@ -1,0 +1,155 @@
+.activity #capabilitiesPanel {
+  padding: 18px 16px 24px;
+}
+
+#capabilitiesPanel .section-label {
+  padding: 4px 2px 12px;
+  font-size: 11px;
+}
+
+#capabilitiesPanel .capability {
+  margin-bottom: 10px;
+  padding: 14px;
+}
+
+#capabilitiesPanel .capability-head strong {
+  font-size: 14px;
+}
+
+#capabilitiesPanel .capability-head small {
+  font-size: 10px;
+}
+
+#capabilitiesPanel .chips {
+  gap: 6px;
+  margin-top: 10px;
+}
+
+#capabilitiesPanel .chip {
+  padding: 3px 7px;
+  font-size: 10px;
+}
+
+.tool-box {
+  margin-top: 20px;
+  padding-top: 18px;
+}
+
+.tool-box > label:first-child {
+  margin-bottom: 10px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.tool-box input,
+.tool-box textarea,
+.tool-box select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  outline: 0;
+  background: var(--panel);
+  color: var(--text);
+  min-height: 42px;
+  padding: 10px 11px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.tool-box textarea {
+  min-height: 76px;
+  margin-top: 10px;
+  resize: vertical;
+  font: 12px/1.6 "Cascadia Mono", monospace;
+}
+
+.tool-box > input,
+.tool-box > .path-picker {
+  margin-top: 10px;
+}
+
+.tool-box .path-picker {
+  gap: 10px;
+}
+
+.tool-box .path-picker .quiet {
+  min-width: 86px;
+  min-height: 42px;
+  font-size: 13px;
+}
+
+.api-request-line {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 10px;
+}
+
+.api-request-options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.api-request-options label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.api-request-options select,
+.api-request-options input {
+  margin-top: 6px;
+}
+
+.api-security-note {
+  display: block;
+  margin-top: 10px;
+  color: var(--danger);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+#capabilitiesPanel .wide {
+  min-height: 42px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+#capabilitiesPanel .wide.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 4px 12px rgb(101 87 216 / 20%);
+}
+
+#capabilitiesPanel .wide.primary:hover {
+  filter: brightness(0.94);
+  box-shadow: 0 6px 16px rgb(101 87 216 / 28%);
+}
+
+#capabilitiesPanel details {
+  margin-top: 14px;
+}
+
+#capabilitiesPanel details summary {
+  padding: 7px 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+@media (max-width: 1120px) {
+  .api-request-options {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 1250px) {
+  .workspace {
+    grid-template-columns: 220px minmax(480px, 1fr) 420px;
+  }
+}

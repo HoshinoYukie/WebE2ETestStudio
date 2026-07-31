@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Test Agent Studio</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="light-theme.css">
+  <link rel="stylesheet" href="api-tools.css">
+  <link rel="stylesheet" href="live-browser.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">T</span>Test Agent Studio</div>
+      <div class="title" id="sessionTitle">New test</div>
+      <div class="top-actions">
+        <span class="status" id="status"><i></i> Ready</span>
+        <button class="quiet" id="modelSettings">Model settings</button>
+        <button class="quiet" id="syncButton">Sync manual</button>
+        <button class="quiet" data-open-tab="capabilities">Attach tool</button>
+        <button class="primary" id="saveButton">Export test</button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="recent">
+        <div class="section-label">Recent work</div>
+        <button class="new-test" id="newSession">＋ New test</button>
+        <div class="draft-list" id="sessions">
+          <button class="draft active">
+            <strong>Current test</strong><span>0 verified steps</span>
+          </button>
+        </div>
+        <div class="project-block">
+          <span>PROJECT WORKSPACE</span>
+          <strong id="projectName">Workspace</strong>
+          <small id="workspace">Loading…</small>
+        </div>
+      </aside>
+
+      <main class="stage">
+        <div class="browser-head">
+          <span>Browser</span>
+          <div class="browser-tabs" id="browserTabs"></div>
+          <div><span class="live-dot">LIVE</span><span id="pageMeta">No active page</span></div>
+        </div>
+        <div class="browser-frame" id="browserFrame">
+          <div class="browser-empty">
+            <div class="browser-icon">◎</div>
+            <strong>Browser preview</strong>
+            <span>Start a test goal to open the managed browser.</span>
+          </div>
+        </div>
+      </main>
+
+      <section class="activity">
+        <div class="activity-head">
+          <div class="tabs">
+            <button class="active" data-tab="run">Run</button>
+            <button data-tab="steps">Steps</button>
+            <button data-tab="capabilities">Capabilities</button>
+          </div>
+          <span id="stepCount">0 verified</span>
+        </div>
+        <div class="activity-body">
+          <div class="tab-panel active feed" id="runPanel">
+            <div class="welcome">
+              <span class="agent-orb">✦</span>
+              <strong>Execution timeline</strong>
+              <p>Browser、HTTP API 和工具调用将在这里实时显示。</p>
+            </div>
+          </div>
+          <div class="tab-panel" id="stepsPanel">
+            <div class="timeline" id="timeline"><div class="empty-row">No verified steps yet.</div></div>
+            <div class="artifacts">
+              <div class="artifact" id="assetArtifact"><span>JSON</span><div><strong>Test asset</strong><small>Not generated</small></div></div>
+              <div class="artifact" id="pytestArtifact"><span>PY</span><div><strong>Plain PyTest</strong><small>Not generated</small></div></div>
+            </div>
+          </div>
+          <div class="tab-panel" id="capabilitiesPanel">
+            <div class="section-label">Available adapters</div>
+            <div id="capabilityList"></div>
+            <div class="tool-box">
+              <label>Send and record an HTTP API request</label>
+              <div class="api-request-line">
+                <select id="httpMethod" aria-label="HTTP method">
+                  <option>GET</option><option>POST</option><option>PUT</option>
+                  <option>PATCH</option><option>DELETE</option>
+                  <option>HEAD</option><option>OPTIONS</option>
+                </select>
+                <input id="httpUrl" placeholder="https://api.example.com/resource">
+              </div>
+              <textarea id="httpHeaders" rows="3" spellcheck="false"
+                placeholder='Headers as JSON, e.g. {"Authorization":"Bearer token"}'></textarea>
+              <textarea id="httpBody" rows="4" spellcheck="false"
+                placeholder="Optional JSON or raw request body"></textarea>
+              <div class="api-request-options">
+                <label>Body<select id="httpBodyType"><option value="json">JSON</option><option value="raw">Raw text</option></select></label>
+                <label>Expected status<input id="httpExpectedStatus" type="number" value="200" min="100" max="599"></label>
+                <label>Timeout (seconds)<input id="httpTimeout" type="number" value="30" min="0.1" step="0.1"></label>
+              </div>
+              <small class="api-security-note">Headers and body are recorded in the test asset and exported PyTest. Use test-only credentials.</small>
+              <button class="wide primary" id="sendHttpRequest">Send and record</button>
+            </div>
+            <div class="tool-box">
+              <label>Manually launch and record an application</label>
+              <div class="path-picker">
+                <input id="launchPath" placeholder="Executable path (.exe)">
+                <button class="quiet" id="chooseLaunchPath">Choose…</button>
+              </div>
+              <input id="launchArgs" placeholder="Optional launch arguments">
+              <button class="wide primary" id="launchTool">Launch and record</button>
+              <details>
+                <summary>Script tools</summary>
+                <label>Attach project tool</label>
+                <input id="toolPath" placeholder="Python / PowerShell / Node path">
+                <button class="wide" id="registerTool">Attach tool</button>
+                <label>Run attached tool</label>
+                <input id="toolRef" placeholder="Tool ID or name">
+                <input id="toolArgs" placeholder="Arguments, separated like a command line">
+                <button class="wide" id="runTool">Run and record tool</button>
+              </details>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer class="composer-wrap">
+      <div class="composer">
+        <textarea id="prompt" rows="1" placeholder="Describe a test goal, continue the run, or answer the agent…"></textarea>
+        <div class="composer-bar">
+          <div class="composer-meta">
+            <span>Agent may combine Browser · HTTP API · Project Tools</span>
+            <span>Enter to run · Shift+Enter for newline</span>
+          </div>
+          <div>
+            <button class="quiet" id="startButton">Configure</button>
+            <button class="quiet" id="cancelButton" hidden>Cancel action</button>
+            <button class="send" id="sendButton" disabled>Start</button>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <dialog id="sessionDialog">
+    <form method="dialog" id="sessionForm">
+      <div class="dialog-head"><div><small>NEW TEST</small><h2>Configure Agent session</h2></div><button value="cancel">×</button></div>
+      <label>Test name<input name="name" value="recorded_flow" required></label>
+      <label>Goal<textarea name="goal" required>验证关键业务流程</textarea></label>
+      <label>Initial browser URL <small>(optional for API/tool-only tasks)</small><input name="url" placeholder="https://example.com"></label>
+      <label>Output directory<input name="output_dir" id="outputDir" required></label>
+      <label class="checkbox"><input type="checkbox" name="headless"> Run browser headless</label>
+      <div class="dialog-actions"><button value="cancel" class="quiet">Cancel</button><button value="start" class="primary">Start Agent</button></div>
+    </form>
+  </dialog>
+  <dialog id="modelDialog">
+    <form method="dialog" id="modelForm">
+      <div class="dialog-head"><div><small>VLM CONFIGURATION</small><h2>Model settings</h2></div><button value="cancel">×</button></div>
+      <div class="model-current" id="modelCurrent">No API key configured</div>
+      <label>API Key<input type="password" name="api_key" autocomplete="off" placeholder="Leave blank to keep the current key"></label>
+      <label>Model<input name="model" value="gpt-4o" required placeholder="Model deployment name"></label>
+      <label>Base URL <small>(optional, OpenAI-compatible)</small><input name="base_url" placeholder="https://provider.example/v1"></label>
+      <label class="checkbox"><input type="checkbox" name="ignore_proxy"> Ignore system proxy for VLM requests</label>
+      <label class="checkbox"><input type="checkbox" name="clear_api_key"> Remove the current API key</label>
+      <p class="security-note">API Key 仅写入当前 Desktop 进程内存，不会进入测试资产或导出的 PyTest。</p>
+      <div class="dialog-actions"><button type="button" id="checkModel" class="quiet">Check connection</button><button value="cancel" class="quiet">Cancel</button><button value="save" class="primary">Save and verify</button></div>
+    </form>
+  </dialog>
+  <script src="app.js"></script>
+</body>
+</html>
