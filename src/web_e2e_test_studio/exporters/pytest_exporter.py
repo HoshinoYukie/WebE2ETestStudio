@@ -237,6 +237,12 @@ class PytestExporter:
             self._render_action(asset, step.action)
             for step in asset.steps
         ]
+        if any(
+            step.action.name
+            in {"bind_page", "switch_page", "close_page", "open_popup"}
+            for step in asset.steps
+        ):
+            body.insert(0, "pages: dict[str, Page] = {'main': page}")
         if not body:
             body.append("pass")
         test_lines = [
@@ -244,7 +250,11 @@ class PytestExporter:
                 f"def {_test_name(asset.name, asset.id)}"
                 f"({'page: Page' if has_browser_steps else ''}) -> None:"
             ),
-            *[f"    {line}" for line in body],
+            *[
+                rendered_line
+                for action_source in body
+                for rendered_line in _indent_source(action_source)
+            ],
         ]
 
         sections = [
@@ -321,6 +331,31 @@ class PytestExporter:
             return self._render_wait(action)
         if name == "screenshot":
             return self._render_screenshot(action)
+        if name == "bind_page":
+            page_ref = _string_argument(action, "page_ref")
+            return f"pages[{page_ref!r}] = page"
+        if name == "switch_page":
+            page_ref = _string_argument(action, "page_ref")
+            return f"page = pages[{page_ref!r}]\npage.bring_to_front()"
+        if name == "close_page":
+            page_ref = _string_argument(action, "page_ref")
+            return f"pages[{page_ref!r}].close()\npages.pop({page_ref!r})"
+        if name == "open_popup":
+            page_ref = _string_argument(action, "page_ref")
+            target = _locator_expression(_required_locator(action))
+            timeout = _optional_number_argument(action, "timeout")
+            timeout_option = (
+                f"timeout={_number_literal(timeout)}"
+                if timeout is not None
+                else ""
+            )
+            return (
+                f"with page.expect_popup({timeout_option}) as popup_info:\n"
+                f"    {target}.click({timeout_option})\n"
+                "page = popup_info.value\n"
+                f"pages[{page_ref!r}] = page\n"
+                "page.wait_for_load_state()"
+            )
 
         target = _locator_expression(_required_locator(action))
         operation_options = _browser_timeout_options(action)
@@ -604,6 +639,10 @@ def _portable_command_parts(
         )
     )
     return parts
+
+
+def _indent_source(source: str) -> list[str]:
+    return [f"    {line}" if line else "" for line in source.splitlines()]
 
 
 def _browser_timeout_options(action: Action) -> str:

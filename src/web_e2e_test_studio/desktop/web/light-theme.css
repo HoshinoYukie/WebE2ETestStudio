@@ -37,6 +37,24 @@ body,
   border-color: #c9c3f2;
 }
 
+.quiet.validate {
+  border-color: #9bcfc4;
+  color: #08705d;
+  background: #f0faf7;
+  font-weight: 650;
+}
+
+.quiet.validate:hover:not(:disabled) {
+  border-color: #5eb7a5;
+  background: #e4f6f1;
+}
+
+.quiet.validate:disabled {
+  color: #8a9694;
+  background: #f5f7f7;
+  cursor: not-allowed;
+}
+
 .draft.active {
   background: #f0eefc;
 }

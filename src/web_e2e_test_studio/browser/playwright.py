@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import threading
+from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -93,6 +97,12 @@ class PlaywrightDevice:
         self._pages_by_id: dict[str, Any] = {}
         self._next_page_number = 1
         self._page_listeners: list[Callable[[Any], None]] = []
+        self._preview_listeners: list[Callable[[Observation, str], None]] = []
+        self._cdp_sessions: dict[int, Any] = {}
+        self._page_refs: dict[str, Any] = {}
+        self._preview_frame_number = 0
+        self._preview_frame_paths: deque[Path] = deque()
+        self._preview_frame_lock = threading.Lock()
         if page is not None:
             self._context = getattr(page, "context", None)
             self._install_page_tracking(self._context)
@@ -124,6 +134,14 @@ class PlaywrightDevice:
         for page in list(getattr(self._context, "pages", ())):
             listener(page)
 
+    def add_preview_listener(
+        self, listener: Callable[[Observation, str], None]
+    ) -> None:
+        """Receive push-based Chromium screencast frames when supported."""
+        self._preview_listeners.append(listener)
+        for page in list(getattr(self._context, "pages", ())):
+            self._start_screencast(page)
+
     def activate_page(self, page_id: str) -> None:
         """Select one registered tab/popup for subsequent Agent actions."""
         page = self._pages_by_id.get(page_id)
@@ -133,6 +151,7 @@ class PlaywrightDevice:
         if callable(bring_to_front):
             bring_to_front()
         self._page = page
+        self._start_screencast(page)
         self._context_engine.invalidate()
 
     def preview(self) -> Observation:
@@ -140,9 +159,6 @@ class PlaywrightDevice:
         page = self._require_page()
         screenshot_path = ""
         if self._artifact_dir is not None:
-            self._artifact_dir.mkdir(parents=True, exist_ok=True)
-            target = self._artifact_dir / "live-preview.jpg"
-            temporary = self._artifact_dir / "live-preview.tmp"
             frame = page.screenshot(
                 type="jpeg",
                 quality=65,
@@ -150,9 +166,7 @@ class PlaywrightDevice:
             )
             if not isinstance(frame, bytes):
                 raise TypeError("Browser preview did not return image bytes")
-            temporary.write_bytes(frame)
-            temporary.replace(target)
-            screenshot_path = str(target)
+            screenshot_path = str(self._publish_preview_frame(frame))
         return Observation(
             url=str(getattr(page, "url", "")),
             title=self._safe_page_title(page),
@@ -187,6 +201,30 @@ class PlaywrightDevice:
             ("assert_text", "Assert located text", True, ("text",)),
             ("assert_visible", "Assert a located element is visible", True, ()),
             ("screenshot", "Capture a page or element screenshot", False, ()),
+            (
+                "bind_page",
+                "Bind the active tab to a stable page_ref",
+                False,
+                ("page_ref",),
+            ),
+            (
+                "switch_page",
+                "Switch by page_ref, URL/title traits, and optional opener_ref",
+                False,
+                ("page_ref",),
+            ),
+            (
+                "close_page",
+                "Close a tab identified by page_ref",
+                False,
+                ("page_ref",),
+            ),
+            (
+                "open_popup",
+                "Click an element and bind the popup it creates",
+                True,
+                ("page_ref",),
+            ),
         )
         return tuple(
             ActionSpec(
@@ -204,7 +242,25 @@ class PlaywrightDevice:
                         "state": "string",
                     }
                     if name == "wait"
-                    else {}
+                    else (
+                        {
+                            "page_ref": "string",
+                            "url": "string",
+                            "title": "string",
+                            "opener_ref": "string",
+                            "timeout": "number",
+                        }
+                        if name == "switch_page"
+                        else (
+                            {"page_ref": "string"}
+                            if name in {"bind_page", "close_page"}
+                            else (
+                                {"page_ref": "string", "timeout": "number"}
+                                if name == "open_popup"
+                                else {}
+                            )
+                        )
+                    )
                 ),
             )
             for name, description, locator_required, required_arguments in definitions
@@ -219,6 +275,7 @@ class PlaywrightDevice:
         self._context = self._browser.new_context(viewport=dict(self._viewport))
         self._page = self._context.new_page()
         self._install_page_tracking(self._context)
+        self._start_screencast(self._page)
         return self
 
     def close(self) -> None:
@@ -236,6 +293,11 @@ class PlaywrightDevice:
         self._pages_by_id.clear()
         self._next_page_number = 1
         self._page_listeners.clear()
+        self._preview_listeners.clear()
+        self._cdp_sessions.clear()
+        self._page_refs.clear()
+        self._preview_frame_paths.clear()
+        self._preview_frame_number = 0
         self._context_engine.reset()
 
     def observe(self) -> Observation:
@@ -287,6 +349,7 @@ class PlaywrightDevice:
                 "close",
                 lambda: self._recover_closed_page(page),
             )
+        self._start_screencast(page)
         self._context_engine.invalidate()
 
     def _register_page(self, page: Any) -> str:
@@ -326,6 +389,12 @@ class PlaywrightDevice:
         page_id = self._page_ids.pop(id(closed_page), None)
         if page_id is not None:
             self._pages_by_id.pop(page_id, None)
+        self._cdp_sessions.pop(id(closed_page), None)
+        self._page_refs = {
+            reference: page
+            for reference, page in self._page_refs.items()
+            if page is not closed_page
+        }
         if self._page is not closed_page:
             return
         pages = list(getattr(self._context, "pages", ()))
@@ -336,6 +405,106 @@ class PlaywrightDevice:
         ]
         self._page = candidates[-1] if candidates else None
         self._context_engine.invalidate()
+
+    def _find_page(self, arguments: dict[str, JsonValue]) -> Any:
+        page_ref = arguments.get("page_ref")
+        if isinstance(page_ref, str) and page_ref:
+            page = self._page_refs.get(page_ref)
+            if page is not None and not self._page_is_closed(page):
+                return page
+            raise ValueError(
+                f"Browser page reference is not available: {page_ref}"
+            )
+        url = str(arguments.get("url", ""))
+        title = str(arguments.get("title", ""))
+        opener_ref = str(arguments.get("opener_ref", ""))
+        opener = self._page_refs.get(opener_ref) if opener_ref else None
+        matches: list[Any] = []
+        for page in getattr(self._context, "pages", ()):
+            if self._page_is_closed(page):
+                continue
+            if url and url not in str(getattr(page, "url", "")):
+                continue
+            if title and title not in self._safe_page_title(page):
+                continue
+            page_opener = getattr(page, "opener", None)
+            if opener is not None and (
+                not callable(page_opener) or page_opener() is not opener
+            ):
+                continue
+            matches.append(page)
+        if len(matches) != 1:
+            raise ValueError(
+                f"Page selector matched {len(matches)} tabs; expected exactly one"
+            )
+        return matches[0]
+
+    def _start_screencast(self, page: Any) -> None:
+        """Start Chromium's CDP frame stream, falling back silently elsewhere."""
+        if not self._preview_listeners or id(page) in self._cdp_sessions:
+            return
+        new_session = getattr(self._context, "new_cdp_session", None)
+        if not callable(new_session):
+            return
+        try:
+            session = new_session(page)
+            page_id = self._register_page(page)
+
+            def on_frame(event: dict[str, Any]) -> None:
+                session.send(
+                    "Page.screencastFrameAck",
+                    {"sessionId": event["sessionId"]},
+                )
+                self._write_stream_frame(page, page_id, str(event["data"]))
+
+            session.on("Page.screencastFrame", on_frame)
+            session.send(
+                "Page.startScreencast",
+                {
+                    "format": "jpeg",
+                    "quality": 65,
+                    "maxWidth": self._viewport["width"],
+                    "maxHeight": self._viewport["height"],
+                    "everyNthFrame": 1,
+                },
+            )
+            self._cdp_sessions[id(page)] = session
+        except Exception:
+            return
+
+    def _write_stream_frame(
+        self, page: Any, page_id: str, encoded: str
+    ) -> None:
+        if self._artifact_dir is None or page is not self._page:
+            return
+        target = self._publish_preview_frame(base64.b64decode(encoded))
+        observation = Observation(
+            url=str(getattr(page, "url", "")),
+            title=self._safe_page_title(page),
+            screenshot_path=str(target),
+            viewport=dict(self._viewport),
+        )
+        for listener in tuple(self._preview_listeners):
+            listener(observation, page_id)
+
+    def _publish_preview_frame(self, frame: bytes) -> Path:
+        """Publish an immutable frame without replacing a WebView-locked file."""
+        if self._artifact_dir is None:
+            raise RuntimeError("Preview frames require an artifact directory")
+        self._artifact_dir.mkdir(parents=True, exist_ok=True)
+        with self._preview_frame_lock:
+            self._preview_frame_number += 1
+            target = self._artifact_dir / (
+                f"live-preview-{self._preview_frame_number:08d}.jpg"
+            )
+            target.write_bytes(frame)
+            self._preview_frame_paths.append(target)
+            while len(self._preview_frame_paths) > 8:
+                expired = self._preview_frame_paths.popleft()
+                # Windows may keep a frame locked while WebView decodes it.
+                with suppress(PermissionError):
+                    expired.unlink(missing_ok=True)
+            return target
 
     @staticmethod
     def _page_is_closed(page: Any) -> bool:
@@ -438,6 +607,43 @@ class PlaywrightDevice:
                     timeout=float(milliseconds),
                 )
             return {"action": action.name, "milliseconds": milliseconds}
+
+        if action.name == "bind_page":
+            page_ref = self._required_text(arguments, "page_ref")
+            self._page_refs[page_ref] = page
+            return {"action": action.name, "page_ref": page_ref}
+
+        if action.name == "switch_page":
+            selected = self._find_page(arguments)
+            selected_id = self._register_page(selected)
+            self.activate_page(selected_id)
+            return {"action": action.name, "page_id": selected_id}
+
+        if action.name == "close_page":
+            page_ref = self._required_text(arguments, "page_ref")
+            selected = self._page_refs.get(page_ref)
+            if selected is None or self._page_is_closed(selected):
+                raise ValueError(
+                    f"Browser page reference is not available: {page_ref}"
+                )
+            selected.close()
+            self._recover_closed_page(selected)
+            return {"action": action.name, "page_ref": page_ref}
+
+        if action.name == "open_popup":
+            page_ref = self._required_text(arguments, "page_ref")
+            timeout = arguments.get("timeout", 30_000)
+            if isinstance(timeout, bool) or not isinstance(
+                timeout, (int, float)
+            ):
+                raise ValueError("open_popup timeout must be numeric")
+            target = self._resolve_locator(action.locator)
+            with page.expect_popup(timeout=float(timeout)) as popup_info:
+                target.click(timeout=float(timeout))
+            popup = popup_info.value
+            self._page_refs[page_ref] = popup
+            self._activate_page(popup)
+            return {"action": action.name, "page_ref": page_ref}
 
         if action.name == "screenshot":
             options = self._options(

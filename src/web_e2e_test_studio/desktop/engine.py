@@ -44,6 +44,10 @@ from web_e2e_test_studio.desktop.recovery import (
     RunCheckpoint,
     RunCheckpointStore,
 )
+from web_e2e_test_studio.desktop.validation import (
+    ModelFreeValidationResult,
+    ModelFreeValidator,
+)
 from web_e2e_test_studio.domain import (
     Action,
     ActionChannel,
@@ -100,6 +104,7 @@ class DesktopRecordingEngine:
         device: Any | None = None,
         recorder: Any | None = None,
         planner_factory: Callable[[], Planner] | None = None,
+        validator: ModelFreeValidator | None = None,
     ) -> None:
         self._config = config
         self._asset_path = config.asset_path.resolve()
@@ -138,6 +143,8 @@ class DesktopRecordingEngine:
         self._last_observation = Observation()
         self._actions = _build_action_registry(self, self._tools)
         self._active_cancellation: CancellationToken | None = None
+        self._validator = validator or ModelFreeValidator()
+        self._preview_listener: Callable[[Observation, str], None] | None = None
 
     def start(self) -> DesktopRecordingSnapshot:
         """Launch the browser, register tools, navigate, and persist outputs."""
@@ -497,6 +504,17 @@ class DesktopRecordingEngine:
         self._persist_checkpoint()
         return self.snapshot()
 
+    def validate_export(
+        self,
+    ) -> tuple[ModelFreeValidationResult, DesktopRecordingSnapshot]:
+        """Regenerate and execute the exported test without model access."""
+        snapshot = self.save()
+        result = self._validator.run(
+            self._output_path,
+            workspace=self._workspace,
+        )
+        return result, snapshot
+
     def stop(self) -> DesktopRecordingSnapshot:
         """Close the owned browser and return the final state."""
         if self._running:
@@ -519,6 +537,22 @@ class DesktopRecordingEngine:
             preview() if callable(preview) else self.observe()
         )
         return self.snapshot()
+
+    def set_preview_listener(
+        self, listener: Callable[[Observation, str], None]
+    ) -> None:
+        """Publish CDP frames independently from Desktop command polling."""
+        self._preview_listener = listener
+        add_listener = getattr(self._device, "add_preview_listener", None)
+        if callable(add_listener):
+            add_listener(self._handle_preview_frame)
+
+    def _handle_preview_frame(
+        self, observation: Observation, page_id: str
+    ) -> None:
+        self._last_observation = observation
+        if self._preview_listener is not None:
+            self._preview_listener(observation, page_id)
 
     def activate_page(self, page_id: str) -> DesktopRecordingSnapshot:
         """Switch the active tab/popup and refresh its live frame."""

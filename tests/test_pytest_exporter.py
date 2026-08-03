@@ -140,6 +140,45 @@ def _asset_with_browser_and_external_steps() -> RecordedTestAsset:
     )
 
 
+def test_exporter_renders_deterministic_popup_and_page_switching() -> None:
+    asset = RecordedTestAsset(
+        id="asset_tabs",
+        name="Cross tab flow",
+        goal="Open and revisit a popup",
+        steps=[
+            _recorded_step(
+                "s1",
+                "bind_page",
+                arguments={"page_ref": "main"},
+            ),
+            _recorded_step(
+                "s2",
+                "open_popup",
+                arguments={"page_ref": "report", "timeout": 5000},
+                locator=Locator("role", "link", name="Open report"),
+            ),
+            _recorded_step(
+                "s3",
+                "switch_page",
+                arguments={"page_ref": "main"},
+            ),
+            _recorded_step(
+                "s4",
+                "close_page",
+                arguments={"page_ref": "report"},
+            ),
+        ],
+    )
+
+    generated = PytestExporter().render(asset)
+
+    ast.parse(generated)
+    assert "with page.expect_popup(timeout=5000) as popup_info:" in generated
+    assert "pages['report'] = page" in generated
+    assert "page = pages['main']" in generated
+    assert "pages['report'].close()" in generated
+
+
 def test_exporter_supports_builtin_spreadsheet_action_without_tool_ref() -> None:
     asset = RecordedTestAsset(
         id="asset_spreadsheet",

@@ -14,6 +14,7 @@ from web_e2e_test_studio.desktop.engine import (
     DesktopRecordingConfig,
     DesktopRecordingSnapshot,
 )
+from web_e2e_test_studio.desktop.validation import ModelFreeValidationResult
 from web_e2e_test_studio.domain import Observation
 
 
@@ -61,6 +62,19 @@ class FakeEngine:
     def save(self) -> DesktopRecordingSnapshot:
         self.calls.append("save")
         return self._snapshot()
+
+    def validate_export(self):  # noqa: ANN201
+        self.calls.append("validate_export")
+        return (
+            ModelFreeValidationResult(
+                passed=True,
+                exit_code=0,
+                duration_seconds=0.25,
+                output="1 passed",
+                test_path=self.config.output_path,
+            ),
+            self._snapshot(),
+        )
 
     def stop(self) -> DesktopRecordingSnapshot:
         self.calls.append("stop")
@@ -110,11 +124,15 @@ def test_controller_runs_commands_on_worker_and_emits_events(
         started = _wait_for_event(controller, "snapshot")
         controller.sync_manual()
         synced = _wait_for_event(controller, "snapshot")
+        controller.validate_export()
+        validated = _wait_for_event(controller, "validation_passed")
 
         assert started.snapshot is not None
         assert started.snapshot.running is True
         assert synced.message == "Manual browser actions synchronized"
-        assert engines[0].calls == ["start", "sync_manual"]
+        assert validated.payload["status"] == "passed"
+        assert validated.payload["output"] == "1 passed"
+        assert engines[0].calls == ["start", "sync_manual", "validate_export"]
     finally:
         controller.close()
 

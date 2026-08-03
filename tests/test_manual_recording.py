@@ -225,6 +225,67 @@ def test_browser_event_recorder_keeps_console_event_across_navigation() -> None:
     assert "__WEB_E2E_TEST_STUDIO_EVENT__" in page.init_scripts[0]
 
 
+def test_browser_event_recorder_promotes_manual_popup_to_cross_tab_actions() -> None:
+    class _Page(FakeCrossNavigationPage):
+        def __init__(self, opener=None) -> None:  # noqa: ANN001
+            super().__init__()
+            self._opener = opener
+
+        def opener(self):  # noqa: ANN201
+            return self._opener
+
+    main = _Page()
+    popup = _Page(main)
+    recorder = BrowserEventRecorder()
+    recorder.install(main)
+    assert main.console_handler is not None
+    main.console_handler(
+        FakeConsoleMessage(
+            '__WEB_E2E_TEST_STUDIO_EVENT__{"type":"click","timestamp":10,'
+            '"target":{"role":"link","name":"Open report"}}'
+        )
+    )
+    recorder.install(popup)
+    assert popup.console_handler is not None
+    popup.console_handler(
+        FakeConsoleMessage(
+            '__WEB_E2E_TEST_STUDIO_EVENT__{"type":"input","timestamp":19,'
+            '"value":"q","target":{"label":"Search",'
+            '"tag":"input","input_type":"text"}}'
+        )
+    )
+    popup.console_handler(
+        FakeConsoleMessage(
+            '__WEB_E2E_TEST_STUDIO_EVENT__{"type":"input","timestamp":20,'
+            '"value":"quarterly","target":{"label":"Search",'
+            '"tag":"input","input_type":"text"}}'
+        )
+    )
+
+    actions = recorder.drain_all()
+
+    assert [action.name for action in actions] == [
+        "bind_page",
+        "open_popup",
+        "fill",
+    ]
+    assert actions[0].arguments == {"page_ref": "main"}
+    assert actions[1].arguments == {"page_ref": "popup_1"}
+    assert actions[1].locator == Locator("role", "link", name="Open report")
+    assert actions[2].arguments == {"text": "quarterly"}
+
+    main.console_handler(
+        FakeConsoleMessage(
+            '__WEB_E2E_TEST_STUDIO_EVENT__{"type":"click","timestamp":30,'
+            '"target":{"role":"button","name":"Refresh"}}'
+        )
+    )
+    follow_up = recorder.drain_all()
+
+    assert [action.name for action in follow_up] == ["switch_page", "click"]
+    assert follow_up[0].arguments == {"page_ref": "main"}
+
+
 class FakeLifecycleContext:
     def __init__(self, page) -> None:  # noqa: ANN001
         self.page = page
@@ -647,7 +708,7 @@ def test_playwright_device_tracks_and_switches_multiple_pages() -> None:
         device.activate_page(pages[1].id)
 
 
-def test_playwright_device_reuses_one_lightweight_preview_file(
+def test_playwright_device_publishes_immutable_lightweight_preview_files(
     tmp_path: Path,
 ) -> None:
     class _PreviewPage:
@@ -671,10 +732,107 @@ def test_playwright_device_reuses_one_lightweight_preview_file(
     first = device.preview()
     second = device.preview()
 
-    assert first.screenshot_path == str(tmp_path / "live-preview.jpg")
-    assert second.screenshot_path == first.screenshot_path
+    assert first.screenshot_path == str(
+        tmp_path / "live-preview-00000001.jpg"
+    )
+    assert second.screenshot_path == str(
+        tmp_path / "live-preview-00000002.jpg"
+    )
+    assert second.screenshot_path != first.screenshot_path
     assert Path(second.screenshot_path).read_bytes() == b"jpeg-frame"
     assert second.url == "https://example.test/live"
+
+
+def test_playwright_preview_does_not_replace_a_locked_frame(
+    tmp_path: Path, monkeypatch
+) -> None:  # noqa: ANN001
+    class _PreviewPage:
+        context = None
+        url = "https://example.test/live"
+
+        def on(self, event, callback) -> None:  # noqa: ANN001
+            return None
+
+        def title(self) -> str:
+            return "Live"
+
+        def screenshot(self, **options) -> bytes:  # noqa: ANN003
+            return b"new-frame"
+
+    def locked_replace(self, target):  # noqa: ANN001, ANN202
+        raise PermissionError(5, "Access denied", str(target))
+
+    monkeypatch.setattr(Path, "replace", locked_replace)
+    device = PlaywrightDevice(page=_PreviewPage(), artifact_dir=tmp_path)
+
+    observation = device.preview()
+
+    assert Path(observation.screenshot_path).read_bytes() == b"new-frame"
+
+
+def test_playwright_device_publishes_cdp_screencast_frames(
+    tmp_path: Path,
+) -> None:
+    import base64
+
+    class _Session:
+        def __init__(self) -> None:
+            self.listeners = {}
+            self.sent = []
+
+        def on(self, event, callback) -> None:  # noqa: ANN001
+            self.listeners[event] = callback
+
+        def send(self, method, params=None) -> None:  # noqa: ANN001
+            self.sent.append((method, params))
+
+    class _Context:
+        def __init__(self) -> None:
+            self.pages = []
+            self.session = _Session()
+
+        def on(self, event, callback) -> None:  # noqa: ANN001
+            return None
+
+        def new_cdp_session(self, page):  # noqa: ANN001
+            return self.session
+
+    class _Page:
+        url = "https://example.test/live"
+
+        def __init__(self, context) -> None:  # noqa: ANN001
+            self.context = context
+
+        def on(self, event, callback) -> None:  # noqa: ANN001
+            return None
+
+        def title(self) -> str:
+            return "Live"
+
+        def is_closed(self) -> bool:
+            return False
+
+    context = _Context()
+    page = _Page(context)
+    context.pages.append(page)
+    device = PlaywrightDevice(page=page, artifact_dir=tmp_path)
+    frames = []
+
+    device.add_preview_listener(lambda observation, page_id: frames.append((observation, page_id)))
+    context.session.listeners["Page.screencastFrame"](
+        {
+            "sessionId": 7,
+            "data": base64.b64encode(b"pushed-frame").decode("ascii"),
+        }
+    )
+
+    assert context.session.sent[0][0] == "Page.startScreencast"
+    assert context.session.sent[-1] == (
+        "Page.screencastFrameAck",
+        {"sessionId": 7},
+    )
+    assert Path(frames[0][0].screenshot_path).read_bytes() == b"pushed-frame"
+    assert frames[0][1] == "page_1"
 
 
 def test_playwright_wait_without_arguments_uses_shared_default() -> None:
@@ -750,5 +908,9 @@ def test_playwright_device_exposes_specs_for_every_supported_action() -> None:
         "assert_text",
         "assert_visible",
         "screenshot",
+        "bind_page",
+        "switch_page",
+        "close_page",
+        "open_popup",
     ]
     assert all(spec.channel is ActionChannel.BROWSER for spec in specs)

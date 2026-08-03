@@ -6,6 +6,7 @@ let state = {
   snapshot: null,
   modelAvailable: false,
   agentBusy: false,
+  validating: false,
   polling: false
 };
 
@@ -122,8 +123,23 @@ async function pollEvents() {
   for (const event of events) {
     if (event.kind !== "browser_preview") addAgentEvent(event);
     if (event.message?.startsWith("VLM run finished")) setAgentBusy(false);
+    if (event.kind === "error" && event.payload?.command === "validate_export") {
+      setValidationBusy(false);
+    }
+    if (event.kind === "validation_passed" || event.kind === "validation_failed") {
+      setValidationBusy(false);
+      setStatus(
+        event.kind === "validation_passed"
+          ? "Model-free validation passed"
+          : "Model-free validation failed",
+        event.kind === "validation_failed"
+      );
+    }
     if (event.snapshot) applySnapshot(event.snapshot);
-    if (event.kind === "browser_preview") continue;
+    if (event.kind === "browser_preview") {
+      if (event.payload?.screenshot_data_url) applyStreamFrame(event.payload);
+      continue;
+    }
     const statusText = event.kind === "progress"
       ? event.message
       : (event.kind === "error" ? `Error: ${event.message}` : (event.snapshot?.running ? "Running" : "Ready"));
@@ -134,9 +150,21 @@ async function pollEvents() {
   }
 }
 
+function applyStreamFrame(frame) {
+  const container = $("#browserFrame");
+  let image = container.querySelector("img");
+  if (!image) {
+    container.innerHTML = '<img alt="Live browser frame">';
+    image = container.querySelector("img");
+  }
+  image.src = frame.screenshot_data_url;
+  $("#pageMeta").textContent = `${frame.title || "Untitled"} · ${frame.url || "No URL"}`;
+}
+
 function applySnapshot(snapshot) {
   state.snapshot = snapshot;
   state.running = snapshot.running;
+  $("#validateButton").disabled = !snapshot.running || state.validating;
   $("#stepCount").textContent = `${snapshot.step_count} verified`;
   document.querySelector(".draft span").textContent = `${snapshot.step_count} verified steps`;
   $("#startButton").textContent = snapshot.running ? "运行中" : "启动会话";
@@ -201,6 +229,13 @@ function addUserMessage(text) {
   const feed = $("#runPanel");
   feed.insertAdjacentHTML("beforeend", `<article class="message user"><div class="bubble">${escapeHtml(text)}</div></article>`);
   feed.scrollTop = feed.scrollHeight;
+}
+
+function setValidationBusy(busy) {
+  state.validating = busy;
+  const button = $("#validateButton");
+  button.disabled = busy || !state.running;
+  button.textContent = busy ? "Validating…" : "Validate without model";
 }
 
 async function sendPrompt() {
@@ -268,7 +303,17 @@ $("#sessionForm").addEventListener("submit", async e => {
   await api().start_session(data);
 });
 $("#syncButton").onclick = async () => { setStatus("Syncing"); await api().sync_manual(); };
-$("#saveButton").onclick = async () => { setStatus("Exporting"); await api().save(); };
+$("#validateButton").onclick = async () => {
+  if (!state.running || state.validating) return;
+  setValidationBusy(true);
+  setStatus("Running model-free validation");
+  try {
+    await api().validate_export();
+  } catch (error) {
+    setValidationBusy(false);
+    setStatus(`Validation could not start · ${error}`, true);
+  }
+};
 $("#registerTool").onclick = async () => {
   const path = $("#toolPath").value.trim();
   if (path) {

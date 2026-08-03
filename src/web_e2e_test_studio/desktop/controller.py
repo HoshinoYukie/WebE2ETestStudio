@@ -17,7 +17,8 @@ from web_e2e_test_studio.desktop.engine import (
     DesktopRecordingEngine,
     DesktopRecordingSnapshot,
 )
-from web_e2e_test_studio.domain import JsonValue
+from web_e2e_test_studio.desktop.validation import ModelFreeValidationResult
+from web_e2e_test_studio.domain import JsonValue, Observation
 
 
 class RecordingEngine(Protocol):
@@ -30,6 +31,10 @@ class RecordingEngine(Protocol):
     def preview(self) -> DesktopRecordingSnapshot: ...
 
     def activate_page(self, page_id: str) -> DesktopRecordingSnapshot: ...
+
+    def set_preview_listener(
+        self, listener: Callable[[Observation, str], None]
+    ) -> None: ...
 
     def run_ai(
         self,
@@ -52,6 +57,10 @@ class RecordingEngine(Protocol):
     ) -> DesktopRecordingSnapshot: ...
 
     def save(self) -> DesktopRecordingSnapshot: ...
+
+    def validate_export(
+        self,
+    ) -> tuple[ModelFreeValidationResult, DesktopRecordingSnapshot]: ...
 
     def stop(self) -> DesktopRecordingSnapshot: ...
 
@@ -165,6 +174,12 @@ class DesktopStudioController:
     def save(self) -> None:
         self._submit(_Command("save"))
 
+    def validate_export(self) -> None:
+        self._events.put(
+            StudioEvent(kind="progress", message="Running model-free validation")
+        )
+        self._submit(_Command("validate_export"))
+
     def stop(self) -> None:
         self._submit(_Command("stop"))
 
@@ -216,6 +231,7 @@ class DesktopStudioController:
                     StudioEvent(
                         kind="error",
                         message=format_studio_error(exc),
+                        payload={"command": command.kind},
                     )
                 )
 
@@ -228,6 +244,11 @@ class DesktopStudioController:
             if self._engine is not None:
                 self._engine.stop()
             self._engine = self._engine_factory(command.config)
+            set_preview_listener = getattr(
+                self._engine, "set_preview_listener", None
+            )
+            if callable(set_preview_listener):
+                set_preview_listener(self._emit_stream_frame)
             snapshot = (
                 self._engine.resume()
                 if command.kind == "resume"
@@ -297,6 +318,9 @@ class DesktopStudioController:
             )
         elif command.kind == "save":
             self._emit("Asset and Pytest file saved", engine.save())
+        elif command.kind == "validate_export":
+            validation_result, snapshot = engine.validate_export()
+            self._emit_validation_result(validation_result, snapshot)
         elif command.kind == "stop":
             self._emit("Recording stopped", engine.stop())
             self._engine = None
@@ -311,6 +335,46 @@ class DesktopStudioController:
                 payload=event.payload,
             )
         )
+
+    def _emit_validation_result(
+        self,
+        result: ModelFreeValidationResult,
+        snapshot: DesktopRecordingSnapshot,
+    ) -> None:
+        self._events.put(
+            StudioEvent(
+                kind="validation_passed" if result.passed else "validation_failed",
+                message=(
+                    "Model-free validation passed"
+                    if result.passed
+                    else "Model-free validation failed"
+                ),
+                snapshot=snapshot,
+                payload={
+                    "status": "passed" if result.passed else "failed",
+                    "exit_code": result.exit_code,
+                    "duration_seconds": round(result.duration_seconds, 2),
+                    "test_path": str(result.test_path),
+                    "output": result.output,
+                },
+            )
+        )
+
+    def _emit_stream_frame(
+        self, observation: Observation, page_id: str
+    ) -> None:
+        event = StudioEvent(
+            kind="browser_preview",
+            message="Live browser frame",
+            payload={
+                "page_id": page_id,
+                "url": observation.url,
+                "title": observation.title,
+                "screenshot_path": observation.screenshot_path,
+            },
+        )
+        with self._latest_preview_lock:
+            self._latest_preview = event
 
     def _require_engine(self) -> RecordingEngine:
         if self._engine is None:

@@ -231,6 +231,10 @@ class StudioBridge:
         self.controller.save()
         return {"accepted": True}
 
+    def validate_export(self) -> dict[str, bool]:
+        self.controller.validate_export()
+        return {"accepted": True}
+
     def stop(self) -> dict[str, bool]:
         self.controller.stop()
         return {"accepted": True}
@@ -283,11 +287,19 @@ class StudioBridge:
     def poll_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         for event in self.controller.poll_events():
+            payload = dict(event.payload)
+            screenshot_path = payload.pop("screenshot_path", "")
+            if isinstance(screenshot_path, str) and screenshot_path:
+                payload["screenshot_data_url"] = screenshot_data_url(
+                    screenshot_path
+                )
+            if "url" in payload:
+                payload["url"] = _safe_display_url(str(payload["url"]))
             item: dict[str, Any] = {
                 "kind": event.kind,
                 "message": event.message,
                 "details": list(event.details),
-                "payload": event.payload,
+                "payload": payload,
             }
             if event.snapshot is not None:
                 snapshot = event.snapshot

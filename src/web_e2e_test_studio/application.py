@@ -225,7 +225,10 @@ def _sync_manual_events(
     verifier: DeterministicVerifier,
     registry: ActionRegistry,
 ) -> list[RecordedStep]:
-    captured_actions = recorder.drain(page)
+    drain_all = getattr(recorder, "drain_all", None)
+    captured_actions = (
+        drain_all() if callable(drain_all) else recorder.drain(page)
+    )
     recorded: list[RecordedStep] = []
     runner = ExecutionRunner(
         observer=device,
