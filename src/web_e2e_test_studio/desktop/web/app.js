@@ -7,6 +7,7 @@ let state = {
   modelAvailable: false,
   agentBusy: false,
   validating: false,
+  validationSteps: {},
   polling: false
 };
 
@@ -17,7 +18,6 @@ window.addEventListener("pywebviewready", async () => {
   $("#projectName").textContent = boot.workspace.split(/[\\/]/).pop() || "Workspace";
   $("#outputDir").value = `${boot.workspace}\\recordings`;
   applyModelSettings(boot.model);
-  renderCapabilities(boot.capabilities);
   renderRecoverableSessions(boot.recoverable_sessions || []);
   setInterval(pollEvents, 250);
   await checkModel();
@@ -107,21 +107,14 @@ function applyModelSettings(settings) {
   form.elements.ignore_proxy.checked = Boolean(settings.ignore_proxy);
 }
 
-function renderCapabilities(capabilities) {
-  $("#capabilityList").innerHTML = capabilities.map(c => `
-    <div class="capability">
-      <div class="capability-head"><strong>${escapeHtml(c.label)}</strong><small>${escapeHtml(c.channel)}</small></div>
-      <div class="chips">${c.actions.map(a => `<span class="chip">${escapeHtml(a.name)}</span>`).join("")}</div>
-    </div>`).join("");
-}
-
 async function pollEvents() {
   if (state.polling) return;
   state.polling = true;
   try {
   const events = await api().poll_events();
   for (const event of events) {
-    if (event.kind !== "browser_preview") addAgentEvent(event);
+    if (!["browser_preview", "validation_step"].includes(event.kind)) addAgentEvent(event);
+    if (event.kind === "validation_step") applyValidationStep(event.payload);
     if (event.message?.startsWith("VLM run finished")) setAgentBusy(false);
     if (event.kind === "error" && event.payload?.command === "validate_export") {
       setValidationBusy(false);
@@ -136,6 +129,9 @@ async function pollEvents() {
       );
     }
     if (event.snapshot) applySnapshot(event.snapshot);
+    if (event.kind === "validation_step" || event.kind === "validation_passed" || event.kind === "validation_failed") {
+      continue;
+    }
     if (event.kind === "browser_preview") {
       if (event.payload?.screenshot_data_url) applyStreamFrame(event.payload);
       continue;
@@ -172,13 +168,14 @@ function applySnapshot(snapshot) {
   $("#pytestArtifact small").textContent = snapshot.output_path;
   const obs = snapshot.observation;
   renderBrowserTabs(snapshot.pages || []);
+  renderVariables(snapshot.variables || []);
   $("#pageMeta").textContent = `${obs.title || "Untitled"} · ${obs.url || "No URL"}`;
   const frame = $("#browserFrame");
   frame.innerHTML = obs.screenshot_data_url
     ? `<img src="${obs.screenshot_data_url}" alt="Latest browser observation">`
     : `<div class="browser-empty">当前观察没有截图</div>`;
   $("#timeline").innerHTML = snapshot.steps.length ? snapshot.steps.map((s, i) => `
-    <div class="step"><span class="step-index">${i + 1}</span><div>
+    <div class="step" data-step-id="${escapeHtml(s.id)}"><span class="step-index">${i + 1}</span><div>
       <strong>${escapeHtml(s.action)} <small>· ${escapeHtml(s.channel)}</small></strong>
       <small>${escapeHtml(s.intent)}</small>
     </div></div>`).join("") : `<div class="empty-row">尚无执行步骤</div>`;
@@ -202,6 +199,242 @@ function renderBrowserTabs(pages) {
       await api().activate_page(button.dataset.pageId);
     };
   });
+}
+
+function renderVariables(variables) {
+  const markup = variables.map(variable => `
+    <button class="variable-item" draggable="true"
+      data-reference="${escapeHtml(variable.reference)}"
+      title="Drag ${escapeHtml(variable.reference)} into an API field or prompt">
+      <strong>${escapeHtml(variable.name)}</strong>
+      <code>${escapeHtml(variable.value)}</code>
+      <small>${escapeHtml(variable.reference)}</small>
+    </button>
+  `).join("");
+  $("#variableList").innerHTML = markup;
+  $("#variableQuickList").innerHTML = markup;
+  $("#variableQuickPanel").hidden = variables.length === 0;
+  document.querySelectorAll(".variable-item").forEach(button => {
+    button.onclick = () => {
+      const prompt = $("#prompt");
+      const separator = prompt.value && !prompt.value.endsWith(" ") ? " " : "";
+      insertReference(prompt, separator + button.dataset.reference);
+    };
+    button.ondragstart = event => {
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.setData("text/plain", button.dataset.reference);
+      event.dataTransfer.setData("application/x-studio-variable", button.dataset.reference);
+      document.body.classList.add("dragging-variable");
+    };
+    button.ondragend = () => document.body.classList.remove("dragging-variable");
+  });
+}
+
+function insertReference(target, reference) {
+  const editor = target.__variableTokenEditor;
+  if (!editor) return;
+  editor.focus();
+  const selection = window.getSelection();
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+  const insertion = range && editor.contains(range.commonAncestorContainer)
+    ? range : document.createRange();
+  if (!range || !editor.contains(range.commonAncestorContainer)) {
+    insertion.selectNodeContents(editor);
+    insertion.collapse(false);
+  }
+  insertion.deleteContents();
+  const tokenReference = reference.trimStart();
+  const leadingText = reference.slice(0, reference.length - tokenReference.length);
+  const token = createVariableToken(tokenReference);
+  const fragment = document.createDocumentFragment();
+  if (leadingText) fragment.append(document.createTextNode(leadingText));
+  fragment.append(token);
+  insertion.insertNode(fragment);
+  insertion.setStartAfter(token);
+  insertion.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(insertion);
+  syncVariableTokenEditor(target);
+}
+
+function createVariableToken(reference) {
+  const token = document.createElement("span");
+  token.className = "variable-token-chip";
+  token.contentEditable = "false";
+  token.dataset.reference = reference;
+  token.title = `${reference} · click to select, then Backspace/Delete`;
+  const label = document.createElement("span");
+  label.textContent = reference.replace("${VAR:", "").replace("}", "");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "variable-token-remove";
+  remove.setAttribute("aria-label", `Remove ${label.textContent}`);
+  remove.textContent = "×";
+  remove.onpointerdown = event => event.preventDefault();
+  remove.onclick = event => {
+    event.stopPropagation();
+    const editor = token.closest(".variable-token-editor");
+    const source = editor?.__variableTokenSource;
+    token.remove();
+    if (source) syncVariableTokenEditor(source);
+  };
+  token.append(label, remove);
+  token.onclick = event => {
+    event.stopPropagation();
+    document.querySelectorAll(".variable-token-chip.selected")
+      .forEach(item => item.classList.remove("selected"));
+    token.classList.add("selected");
+    token.closest(".variable-token-editor")?.focus();
+  };
+  return token;
+}
+
+function serializeTokenEditor(editor) {
+  const serialize = node => {
+    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+    if (node.classList.contains("variable-token-chip")) return node.dataset.reference;
+    if (node.tagName === "BR") return "\n";
+    const content = Array.from(node.childNodes).map(serialize).join("");
+    return ["DIV", "P"].includes(node.tagName) ? `${content}\n` : content;
+  };
+  return Array.from(editor.childNodes).map(serialize).join("").replace(/\n$/, "");
+}
+
+function syncVariableTokenEditor(source) {
+  source.value = serializeTokenEditor(source.__variableTokenEditor);
+  source.dispatchEvent(new Event("input", {bubbles: true}));
+}
+
+function renderTokenEditor(source) {
+  const editor = source.__variableTokenEditor;
+  editor.replaceChildren();
+  const expression = /\$\{VAR:[A-Za-z_][A-Za-z0-9_]*\}/g;
+  let cursor = 0;
+  for (const match of source.value.matchAll(expression)) {
+    if (match.index > cursor) {
+      editor.append(document.createTextNode(source.value.slice(cursor, match.index)));
+    }
+    editor.append(createVariableToken(match[0]));
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < source.value.length) {
+    editor.append(document.createTextNode(source.value.slice(cursor)));
+  }
+}
+
+function setupVariableTokenEditor(source) {
+  source.classList.add("variable-token-source");
+  source.setAttribute("aria-hidden", "true");
+  source.tabIndex = -1;
+  const editor = document.createElement("div");
+  editor.className = `variable-token-editor token-editor-${source.id}`;
+  editor.contentEditable = "true";
+  editor.setAttribute("role", "textbox");
+  editor.setAttribute("aria-label", source.getAttribute("aria-label") || source.placeholder || source.id);
+  editor.dataset.placeholder = source.placeholder || "";
+  source.insertAdjacentElement("afterend", editor);
+  source.__variableTokenEditor = editor;
+  editor.__variableTokenSource = source;
+  renderTokenEditor(source);
+  editor.oninput = () => syncVariableTokenEditor(source);
+  editor.onblur = () => {
+    syncVariableTokenEditor(source);
+    renderTokenEditor(source);
+  };
+  editor.onclick = event => {
+    if (!event.target.closest(".variable-token-chip")) {
+      editor.querySelectorAll(".variable-token-chip.selected")
+        .forEach(item => item.classList.remove("selected"));
+    }
+  };
+  editor.onkeydown = event => {
+    const selected = editor.querySelector(".variable-token-chip.selected");
+    if (selected && ["Backspace", "Delete"].includes(event.key)) {
+      event.preventDefault();
+      selected.remove();
+      syncVariableTokenEditor(source);
+      return;
+    }
+    if (source.id === "prompt" && event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendPrompt();
+    }
+  };
+  return editor;
+}
+
+const variableDropTargets = ["#prompt", "#httpUrl", "#httpHeaders", "#httpBody"];
+variableDropTargets.forEach(selector => {
+  const source = $(selector);
+  const target = setupVariableTokenEditor(source);
+  target.classList.add("variable-drop-target");
+  target.ondragover = event => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    target.classList.add("variable-drop-active");
+  };
+  target.ondragleave = () => target.classList.remove("variable-drop-active");
+  target.ondrop = event => {
+    event.preventDefault();
+    target.classList.remove("variable-drop-active");
+    document.body.classList.remove("dragging-variable");
+    const reference = event.dataTransfer.getData("application/x-studio-variable")
+      || event.dataTransfer.getData("text/plain");
+    if (reference.startsWith("${VAR:")) insertReference(source, reference);
+  };
+});
+
+const variablePanel = $("#variableQuickPanel");
+const variablePanelHandle = $("#variablePanelHandle");
+let variablePanelDrag = null;
+variablePanelHandle.onpointerdown = event => {
+  if (event.target.closest("button")) return;
+  const bounds = variablePanel.getBoundingClientRect();
+  variablePanelDrag = {
+    offsetX: event.clientX - bounds.left,
+    offsetY: event.clientY - bounds.top
+  };
+  variablePanelHandle.setPointerCapture(event.pointerId);
+};
+variablePanelHandle.onpointermove = event => {
+  if (!variablePanelDrag) return;
+  const left = Math.max(8, Math.min(
+    event.clientX - variablePanelDrag.offsetX,
+    window.innerWidth - variablePanel.offsetWidth - 8
+  ));
+  const top = Math.max(8, Math.min(
+    event.clientY - variablePanelDrag.offsetY,
+    window.innerHeight - variablePanel.offsetHeight - 8
+  ));
+  variablePanel.style.left = `${left}px`;
+  variablePanel.style.top = `${top}px`;
+  variablePanel.style.right = "auto";
+};
+variablePanelHandle.onpointerup = event => {
+  variablePanelDrag = null;
+  variablePanelHandle.releasePointerCapture(event.pointerId);
+};
+$("#collapseVariablePanel").onclick = () => {
+  variablePanel.classList.toggle("collapsed");
+  const collapsed = variablePanel.classList.contains("collapsed");
+  $("#collapseVariablePanel").textContent = collapsed ? "+" : "−";
+  $("#collapseVariablePanel").setAttribute("aria-expanded", String(!collapsed));
+};
+
+function applyValidationStep(step) {
+  if (!step?.step_id) return;
+  state.validationSteps[step.step_id] = step;
+  const selector = `.step[data-step-id="${CSS.escape(step.step_id)}"]`;
+  const row = document.querySelector(selector);
+  if (!row) return;
+  let status = row.querySelector(".step-validation");
+  if (!status) {
+    status = document.createElement("span");
+    row.append(status);
+  }
+  status.className = `step-validation ${step.status}`;
+  status.textContent = step.status;
 }
 
 function addAgentEvent(event) {
@@ -233,6 +466,10 @@ function addUserMessage(text) {
 
 function setValidationBusy(busy) {
   state.validating = busy;
+  if (busy) {
+    state.validationSteps = {};
+    document.querySelectorAll(".step-validation").forEach(status => status.remove());
+  }
   const button = $("#validateButton");
   button.disabled = busy || !state.running;
   button.textContent = busy ? "Validating…" : "Validate without model";
@@ -249,6 +486,7 @@ async function sendPrompt() {
   if (!state.running) { $("#sessionDialog").showModal(); return; }
   addUserMessage(text);
   input.value = "";
+  renderTokenEditor(input);
   setStatus("Agent working");
   setAgentBusy(true);
   await api().send_message(text);
@@ -320,6 +558,24 @@ $("#registerTool").onclick = async () => {
     await api().register_tool(path);
     const filename = path.split(/[\\/]/).pop() || "";
     $("#toolRef").value = filename.replace(/\.[^.]+$/, "");
+  }
+};
+$("#defineVariable").onclick = async () => {
+  if (!state.running) {
+    setStatus("Start a recording session before defining variables", true);
+    return;
+  }
+  const name = $("#variableName").value.trim();
+  const description = $("#variableFormat").value.trim();
+  if (!name || !description) {
+    setStatus("Variable name and format are required", true);
+    return;
+  }
+  try {
+    setStatus(`Generating variable ${name}`);
+    await api().define_variable(JSON.stringify({name, description}));
+  } catch (error) {
+    setStatus(`Variable generation failed · ${error}`, true);
   }
 };
 $("#runTool").onclick = async () => {

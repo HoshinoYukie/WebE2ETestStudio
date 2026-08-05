@@ -85,6 +85,10 @@ def test_desktop_ui_starts_session_and_renders_bridge_event() -> None:
                         active: true, opener_id: "page_1"
                       }
                     ],
+                    variables: [{
+                      name: "order_id", value: "ORD-12345678",
+                      reference: "${VAR:order_id}", description: "8 digit order ID"
+                    }],
                     observation: {
                       url: "", title: "", screenshot_path: "C:\\\\out\\\\shot.png",
                       screenshot_data_url: "data:image/png;base64,iVBORw0KGgo=",
@@ -118,6 +122,35 @@ def test_desktop_ui_starts_session_and_renders_bridge_event() -> None:
         page.locator("#status").get_by_text("Model unavailable").wait_for()
         assert page.locator("#sendButton").is_disabled()
         assert page.locator("#sessions").get_by_text("saved-flow").is_visible()
+        page.locator("#sessions").evaluate(
+            """
+            sessions => {
+              for (let index = 0; index < 80; index += 1) {
+                const item = document.createElement("button");
+                item.className = "draft";
+                item.innerHTML = `<strong>Recovered ${index}</strong><span>draft</span>`;
+                sessions.appendChild(item);
+              }
+            }
+            """
+        )
+        layout = page.evaluate(
+            """
+            () => {
+              const workspace = document.querySelector(".workspace").getBoundingClientRect();
+              const stage = document.querySelector(".stage").getBoundingClientRect();
+              const sessions = document.querySelector("#sessions");
+              return {
+                workspaceBottom: workspace.bottom,
+                stageBottom: stage.bottom,
+                sessionClientHeight: sessions.clientHeight,
+                sessionScrollHeight: sessions.scrollHeight,
+              };
+            }
+            """
+        )
+        assert layout["sessionScrollHeight"] > layout["sessionClientHeight"]
+        assert layout["stageBottom"] <= layout["workspaceBottom"]
         page.get_by_role("button", name="＋ New test").click()
         assert page.locator("#sessionDialog").evaluate("dialog => dialog.open")
         page.locator("input[name=name]").fill("flow")
@@ -133,7 +166,22 @@ def test_desktop_ui_starts_session_and_renders_bridge_event() -> None:
             "data:image/png;base64,"
         )
         assert page.locator("#browserTabs .browser-tab").count() == 2
-        assert page.locator("#browserTabs .browser-tab.active").inner_text() == "Export"
+        assert page.locator(
+            "#browserTabs .browser-tab.active"
+        ).inner_text().strip().endswith("Export")
+        assert page.locator("#variableQuickPanel").is_visible()
+        assert page.locator("#variableQuickList .variable-item").get_attribute(
+            "draggable"
+        ) == "true"
+        page.locator("#variableQuickList .variable-item").click()
+        assert page.locator("#prompt").input_value() == "${VAR:order_id}"
+        assert page.locator(
+            ".token-editor-prompt .variable-token-chip"
+        ).inner_text().startswith("order_id")
+        page.locator(
+            ".token-editor-prompt .variable-token-remove"
+        ).click()
+        assert page.locator("#prompt").input_value() == ""
         page.get_by_role("button", name="Devices").click()
         assert ["activate_page", "page_1"] in page.evaluate(
             "window.__studioCalls"

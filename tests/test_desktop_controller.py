@@ -14,8 +14,12 @@ from web_e2e_test_studio.desktop.engine import (
     DesktopRecordingConfig,
     DesktopRecordingSnapshot,
 )
-from web_e2e_test_studio.desktop.validation import ModelFreeValidationResult
+from web_e2e_test_studio.desktop.validation import (
+    ModelFreeValidationResult,
+    StepValidationEvent,
+)
 from web_e2e_test_studio.domain import Observation
+from web_e2e_test_studio.variables import VariableDefinition
 
 
 class FakeEngine:
@@ -63,8 +67,12 @@ class FakeEngine:
         self.calls.append("save")
         return self._snapshot()
 
-    def validate_export(self):  # noqa: ANN201
+    def validate_export(self, event_sink=None):  # noqa: ANN001, ANN201
         self.calls.append("validate_export")
+        if event_sink is not None:
+            event_sink(
+                StepValidationEvent("step_1", "navigate", "passed")
+            )
         return (
             ModelFreeValidationResult(
                 passed=True,
@@ -73,6 +81,16 @@ class FakeEngine:
                 output="1 passed",
                 test_path=self.config.output_path,
             ),
+            self._snapshot(),
+        )
+
+    def define_variable(self, name: str, description: str):  # noqa: ANN201
+        self.calls.append(f"define_variable:{name}")
+        return (
+            VariableDefinition(
+                name, description, "digits", {"length": 8, "prefix": ""}
+            ),
+            "12345678",
             self._snapshot(),
         )
 
@@ -133,6 +151,35 @@ def test_controller_runs_commands_on_worker_and_emits_events(
         assert validated.payload["status"] == "passed"
         assert validated.payload["output"] == "1 passed"
         assert engines[0].calls == ["start", "sync_manual", "validate_export"]
+    finally:
+        controller.close()
+
+
+def test_controller_defines_and_previews_generated_variable(
+    tmp_path: Path,
+) -> None:
+    config = DesktopRecordingConfig(
+        url="",
+        goal="Variables",
+        name="variables",
+        asset_path=tmp_path / "asset.json",
+        output_path=tmp_path / "test_variables.py",
+        workspace=tmp_path,
+    )
+    controller = DesktopStudioController(engine_factory=FakeEngine)
+    try:
+        controller.start(config)
+        _wait_for_event(controller, "snapshot")
+        controller.define_variable("order_id", "8位数字")
+
+        event = _wait_for_event(controller, "variable_defined")
+
+        assert event.payload == {
+            "name": "order_id",
+            "description": "8位数字",
+            "reference": "${VAR:order_id}",
+            "value": "12345678",
+        }
     finally:
         controller.close()
 

@@ -12,10 +12,12 @@ from web_e2e_test_studio.domain import (
     ActionChannel,
     JsonValue,
     Locator,
+    RecordedStep,
     TestAsset,
 )
 
 _ENV_REFERENCE = re.compile(r"\$\{ENV:([A-Za-z_][A-Za-z0-9_]*)\}")
+_VARIABLE_REFERENCE = re.compile(r"\$\{VAR:([A-Za-z_][A-Za-z0-9_]*)\}")
 
 _HTTP_HELPER = """def _http_request(
     *,
@@ -163,6 +165,18 @@ _SPREADSHEET_HELPER = """def _extract_spreadsheet(
         assert matches, f"No spreadsheet values matched query: {query}"
         return matches"""
 
+_STEP_REPORTER = '''@contextmanager
+def _validation_step(step_id: str, action: str) -> Iterator[None]:
+    prefix = "__WEB_E2E_STEP__"
+    print(f"{prefix}|running|{step_id}|{action}", flush=True)
+    try:
+        yield
+    except BaseException:
+        print(f"{prefix}|failed|{step_id}|{action}", flush=True)
+        raise
+    else:
+        print(f"{prefix}|passed|{step_id}|{action}", flush=True)'''
+
 
 class PytestExporter:
     """Render model-independent recorded assets as executable pytest source."""
@@ -201,8 +215,14 @@ class PytestExporter:
             not in asset.tool_dependencies.get(step.action.tool_ref, {})
             for step in asset.steps
         )
+        variable_definitions = _used_variable_definitions(asset)
+        has_environment_references = any(
+            _contains_environment_reference(step.action.arguments)
+            for step in asset.steps
+        )
         imports: list[str] = []
-        if has_browser_steps:
+        if asset.steps:
+            imports.append("from contextlib import contextmanager")
             imports.append("from collections.abc import Iterator")
         if has_api_steps:
             imports.extend(
@@ -210,8 +230,19 @@ class PytestExporter:
             )
         if has_external_steps:
             imports.extend(["import os", "import subprocess"])
+        elif has_environment_references:
+            imports.append("import os")
         if has_application_steps:
             imports.append("import time")
+        if variable_definitions:
+            imports.extend(
+                [
+                    "import random",
+                    "import string",
+                    "import uuid",
+                    "from datetime import UTC, datetime",
+                ]
+            )
         if has_spreadsheet_steps:
             imports.extend(
                 [
@@ -229,14 +260,10 @@ class PytestExporter:
             imports.append(
                 "from playwright.sync_api import Page, sync_playwright, expect"
             )
-
         fixture = (
             self._render_page_fixture(asset) if has_browser_steps else ""
         )
-        body = [
-            self._render_action(asset, step.action)
-            for step in asset.steps
-        ]
+        body = [self._render_step(asset, step) for step in asset.steps]
         if any(
             step.action.name
             in {"bind_page", "switch_page", "close_page", "open_popup"}
@@ -267,6 +294,10 @@ class PytestExporter:
                 "    os.environ.get(\"WEB_E2E_PROJECT_ROOT\", Path.cwd())\n"
                 ").resolve()"
             )
+        if variable_definitions:
+            sections.append(
+                _render_generated_variables(variable_definitions)
+            )
         if has_api_steps:
             sections.append(_HTTP_HELPER)
         if has_download_steps:
@@ -275,10 +306,23 @@ class PytestExporter:
             sections.append(_APPLICATION_HELPER)
         if has_spreadsheet_steps:
             sections.append(_SPREADSHEET_HELPER)
+        if asset.steps:
+            sections.append(_STEP_REPORTER)
         if fixture:
             sections.append(fixture)
         sections.append("\n".join(test_lines))
         return "\n\n".join(sections) + "\n"
+
+    def _render_step(self, asset: TestAsset, step: RecordedStep) -> str:
+        action_source = self._render_action(asset, step.action)
+        nested = "\n".join(
+            f"    {line}" if line else ""
+            for line in action_source.splitlines()
+        )
+        return (
+            f"with _validation_step({step.id!r}, {step.action.name!r}):\n"
+            f"{nested}"
+        )
 
     def export(self, asset: TestAsset, path: str | Path) -> Path:
         """Write the rendered pytest module to ``path`` and return that path."""
@@ -326,7 +370,7 @@ class PytestExporter:
             url = _string_argument(action, "url", default=asset.base_url)
             if not url:
                 raise ValueError("navigate requires a non-empty url or asset base_url")
-            return f"page.goto({url!r})"
+            return f"page.goto({_string_expression(url)})"
         if name == "wait":
             return self._render_wait(action)
         if name == "screenshot":
@@ -373,11 +417,11 @@ class PytestExporter:
         if name == "fill":
             text = _string_argument(action, "text", aliases=("value",))
             suffix = f", {operation_options}" if operation_options else ""
-            return f"{target}.fill({text!r}{suffix})"
+            return f"{target}.fill({_string_expression(text)}{suffix})"
         if name == "press":
             key = _string_argument(action, "key")
             suffix = f", {operation_options}" if operation_options else ""
-            return f"{target}.press({key!r}{suffix})"
+            return f"{target}.press({_string_expression(key)}{suffix})"
         if name == "select":
             option = _select_option_expression(action)
             suffix = f", {operation_options}" if operation_options else ""
@@ -439,8 +483,11 @@ class PytestExporter:
             timeout = action.timeout_seconds
         return (
             "_http_request("
-            f"method={method!r}, url={url!r}, headers={headers!r}, "
-            f"json_body={action.arguments.get('json')!r}, body={body!r}, "
+            f"method={_string_expression(method)}, "
+            f"url={_string_expression(url)}, "
+            f"headers={_value_expression(headers)}, "
+            f"json_body={_value_expression(action.arguments.get('json'))}, "
+            f"body={_value_expression(body)}, "
             f"expected_status={expected_status!r}, "
             f"timeout={_number_literal(timeout) if timeout is not None else '30'}"
             ")"
@@ -853,7 +900,10 @@ def _number_literal(value: int | float) -> str:
 def _string_expression(value: JsonValue) -> str:
     if not isinstance(value, str):
         raise TypeError("Environment-aware values must be strings")
-    matches = list(_ENV_REFERENCE.finditer(value))
+    matches = sorted(
+        [*_ENV_REFERENCE.finditer(value), *_VARIABLE_REFERENCE.finditer(value)],
+        key=lambda match: match.start(),
+    )
     if not matches:
         return repr(value)
     parts: list[str] = []
@@ -861,11 +911,124 @@ def _string_expression(value: JsonValue) -> str:
     for match in matches:
         if match.start() > cursor:
             parts.append(repr(value[cursor : match.start()]))
-        parts.append(f"os.environ[{match.group(1)!r}]")
+        if match.re is _ENV_REFERENCE:
+            parts.append(f"os.environ[{match.group(1)!r}]")
+        else:
+            parts.append(f"VARIABLES[{match.group(1)!r}]")
         cursor = match.end()
     if cursor < len(value):
         parts.append(repr(value[cursor:]))
     return " + ".join(parts)
+
+
+def _value_expression(value: JsonValue) -> str:
+    if isinstance(value, str):
+        return _string_expression(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_value_expression(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(
+            f"{key!r}: {_value_expression(item)}"
+            for key, item in value.items()
+        ) + "}"
+    return repr(value)
+
+
+def _used_variable_definitions(
+    asset: TestAsset,
+) -> dict[str, dict[str, JsonValue]]:
+    used = set().union(
+        *(
+            _referenced_variable_names(step.action.arguments)
+            for step in asset.steps
+        )
+    ) if asset.steps else set()
+    if not used:
+        return {}
+    raw_definitions = asset.metadata.get("variable_definitions", [])
+    if not isinstance(raw_definitions, list):
+        raise ValueError("Asset variable_definitions must be a list")
+    definitions = {
+        str(item.get("name", "")): dict(item)
+        for item in raw_definitions
+        if isinstance(item, dict)
+    }
+    missing = used - definitions.keys()
+    if missing:
+        raise ValueError(
+            "Missing generated variable definitions: "
+            + ", ".join(sorted(missing))
+        )
+    return {name: definitions[name] for name in sorted(used)}
+
+
+def _referenced_variable_names(value: JsonValue) -> set[str]:
+    if isinstance(value, str):
+        return set(_VARIABLE_REFERENCE.findall(value))
+    if isinstance(value, list):
+        return (
+            set().union(*(_referenced_variable_names(item) for item in value))
+            if value
+            else set()
+        )
+    if isinstance(value, dict):
+        return (
+            set().union(
+                *(_referenced_variable_names(item) for item in value.values())
+            )
+            if value
+            else set()
+        )
+    return set()
+
+
+def _contains_environment_reference(value: JsonValue) -> bool:
+    if isinstance(value, str):
+        return bool(_ENV_REFERENCE.search(value))
+    if isinstance(value, list):
+        return any(_contains_environment_reference(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_environment_reference(item) for item in value.values())
+    return False
+
+
+def _render_generated_variables(
+    definitions: dict[str, dict[str, JsonValue]],
+) -> str:
+    return f'''_VARIABLE_DEFINITIONS = {definitions!r}
+
+
+def _generate_variable(definition: dict[str, object]) -> str:
+    kind = str(definition["kind"])
+    options = dict(definition.get("options", {{}}))
+    generator = random.SystemRandom()
+    if kind == "uuid":
+        return str(uuid.uuid4())
+    if kind == "timestamp":
+        value = datetime.now(UTC).timestamp()
+        return str(int(value * (1000 if options.get("unit") == "milliseconds" else 1)))
+    if kind == "datetime":
+        return datetime.now(UTC).strftime(str(options.get("format", "%Y-%m-%d")))
+    if kind == "integer":
+        return str(generator.randint(int(options["minimum"]), int(options["maximum"])))
+    if kind in {{"digits", "alphanumeric"}}:
+        alphabet = string.digits if kind == "digits" else string.ascii_letters + string.digits
+        return str(options.get("prefix", "")) + "".join(
+            generator.choice(alphabet) for _ in range(int(options.get("length", 12)))
+        )
+    if kind == "email":
+        local = "".join(
+            generator.choice(string.ascii_lowercase + string.digits)
+            for _ in range(int(options.get("length", 12)))
+        )
+        return f"{{local}}@{{options.get('domain', 'example.test')}}"
+    raise ValueError(f"Unsupported variable generator kind: {{kind}}")
+
+
+VARIABLES = {{
+    name: _generate_variable(definition)
+    for name, definition in _VARIABLE_DEFINITIONS.items()
+}}'''
 
 
 __all__ = ["PytestExporter"]

@@ -17,8 +17,12 @@ from web_e2e_test_studio.desktop.engine import (
     DesktopRecordingEngine,
     DesktopRecordingSnapshot,
 )
-from web_e2e_test_studio.desktop.validation import ModelFreeValidationResult
+from web_e2e_test_studio.desktop.validation import (
+    ModelFreeValidationResult,
+    StepValidationEvent,
+)
 from web_e2e_test_studio.domain import JsonValue, Observation
+from web_e2e_test_studio.variables import VariableDefinition
 
 
 class RecordingEngine(Protocol):
@@ -60,7 +64,12 @@ class RecordingEngine(Protocol):
 
     def validate_export(
         self,
+        event_sink: Callable[[StepValidationEvent], None] | None = None,
     ) -> tuple[ModelFreeValidationResult, DesktopRecordingSnapshot]: ...
+
+    def define_variable(
+        self, name: str, description: str
+    ) -> tuple[VariableDefinition, str, DesktopRecordingSnapshot]: ...
 
     def stop(self) -> DesktopRecordingSnapshot: ...
 
@@ -179,6 +188,15 @@ class DesktopStudioController:
             StudioEvent(kind="progress", message="Running model-free validation")
         )
         self._submit(_Command("validate_export"))
+
+    def define_variable(self, name: str, description: str) -> None:
+        self._submit(
+            _Command(
+                "define_variable",
+                value=name,
+                payload={"description": description},
+            )
+        )
 
     def stop(self) -> None:
         self._submit(_Command("stop"))
@@ -319,8 +337,28 @@ class DesktopStudioController:
         elif command.kind == "save":
             self._emit("Asset and Pytest file saved", engine.save())
         elif command.kind == "validate_export":
-            validation_result, snapshot = engine.validate_export()
+            validation_result, snapshot = engine.validate_export(
+                self._emit_validation_step
+            )
             self._emit_validation_result(validation_result, snapshot)
+        elif command.kind == "define_variable":
+            description = str(command.payload.get("description", ""))
+            definition, value, snapshot = engine.define_variable(
+                command.value, description
+            )
+            self._events.put(
+                StudioEvent(
+                    kind="variable_defined",
+                    message=f"Generated variable: {definition.name}",
+                    snapshot=snapshot,
+                    payload={
+                        "name": definition.name,
+                        "description": definition.description,
+                        "reference": f"${{VAR:{definition.name}}}",
+                        "value": value,
+                    },
+                )
+            )
         elif command.kind == "stop":
             self._emit("Recording stopped", engine.stop())
             self._engine = None
@@ -356,6 +394,19 @@ class DesktopStudioController:
                     "duration_seconds": round(result.duration_seconds, 2),
                     "test_path": str(result.test_path),
                     "output": result.output,
+                },
+            )
+        )
+
+    def _emit_validation_step(self, event: StepValidationEvent) -> None:
+        self._events.put(
+            StudioEvent(
+                kind="validation_step",
+                message=f"Validation step {event.status}: {event.action}",
+                payload={
+                    "step_id": event.step_id,
+                    "action": event.action,
+                    "status": event.status,
                 },
             )
         )

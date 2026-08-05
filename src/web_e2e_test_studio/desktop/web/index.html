@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="light-theme.css">
   <link rel="stylesheet" href="api-tools.css">
   <link rel="stylesheet" href="live-browser.css">
+  <link rel="stylesheet" href="layout-fixes.css">
 </head>
 <body>
   <div class="shell">
@@ -78,8 +79,15 @@
             </div>
           </div>
           <div class="tab-panel" id="capabilitiesPanel">
-            <div class="section-label">Available adapters</div>
-            <div id="capabilityList"></div>
+            <div class="tool-box variable-box">
+              <label>Generated variables</label>
+              <input id="variableName" placeholder="Variable name, e.g. order_id">
+              <textarea id="variableFormat" rows="2" spellcheck="false"
+                placeholder="Format, e.g. ORD- prefix followed by 8 digits"></textarea>
+              <button class="wide" id="defineVariable">Generate variable</button>
+              <small>Reference with ${VAR:order_id} in API fields or Agent messages. Exported PyTest regenerates used variables on every run.</small>
+              <div class="variable-list" id="variableList"></div>
+            </div>
             <div class="tool-box">
               <label>Send and record an HTTP API request</label>
               <div class="api-request-line">
@@ -99,7 +107,7 @@
                 <label>Expected status<input id="httpExpectedStatus" type="number" value="200" min="100" max="599"></label>
                 <label>Timeout (seconds)<input id="httpTimeout" type="number" value="30" min="0.1" step="0.1"></label>
               </div>
-              <small class="api-security-note">Headers and body are recorded in the test asset and exported PyTest. Use test-only credentials.</small>
+              <small class="api-security-note">Headers, URL and body support ${VAR:name}. They are recorded as references, not current generated values.</small>
               <button class="wide primary" id="sendHttpRequest">Send and record</button>
             </div>
             <div class="tool-box">
@@ -144,7 +152,19 @@
     </footer>
   </div>
 
-  <dialog id="sessionDialog">
+  <aside class="variable-quick-panel" id="variableQuickPanel" hidden>
+    <div class="variable-quick-head" id="variablePanelHandle">
+      <div><span>VARIABLES</span><strong>Quick insert</strong></div>
+      <button type="button" id="collapseVariablePanel"
+        aria-label="Collapse generated variables">−</button>
+    </div>
+    <div class="variable-quick-body">
+      <small>Drag a variable into an API field or the Agent prompt.</small>
+      <div class="variable-list" id="variableQuickList"></div>
+    </div>
+  </aside>
+
+    <dialog id="sessionDialog">
     <form method="dialog" id="sessionForm">
       <div class="dialog-head"><div><small>NEW TEST</small><h2>Configure Agent session</h2></div><button value="cancel">×</button></div>
       <label>Test name<input name="name" value="recorded_flow" required></label>

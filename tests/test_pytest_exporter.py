@@ -179,6 +179,56 @@ def test_exporter_renders_deterministic_popup_and_page_switching() -> None:
     assert "pages['report'].close()" in generated
 
 
+def test_exporter_regenerates_only_referenced_variables_at_module_start() -> None:
+    asset = RecordedTestAsset(
+        id="asset_variables",
+        name="Generated API variable",
+        goal="Use a fresh order ID",
+        metadata={
+            "variable_definitions": [
+                {
+                    "name": "order_id",
+                    "description": "UUID",
+                    "kind": "uuid",
+                    "options": {},
+                },
+                {
+                    "name": "unused",
+                    "description": "UUID",
+                    "kind": "uuid",
+                    "options": {},
+                },
+            ]
+        },
+        steps=[
+            _recorded_step(
+                "s1",
+                "http_request",
+                channel=ActionChannel.API,
+                arguments={
+                    "method": "POST",
+                    "url": "https://api.test/orders/${VAR:order_id}",
+                    "json": {"order_id": "${VAR:order_id}"},
+                    "expected_status": 201,
+                },
+            )
+        ],
+    )
+
+    generated = PytestExporter().render(asset)
+
+    ast.parse(generated)
+    assert "VARIABLES['order_id']" in generated
+    assert "'order_id': {'name': 'order_id'" in generated
+    assert "'unused':" not in generated
+    assert generated.index("VARIABLES =") < generated.index("def test_")
+    first: dict[str, object] = {}
+    second: dict[str, object] = {}
+    exec(compile(generated, "<first-export>", "exec"), first)
+    exec(compile(generated, "<second-export>", "exec"), second)
+    assert first["VARIABLES"] != second["VARIABLES"]
+
+
 def test_exporter_supports_builtin_spreadsheet_action_without_tool_ref() -> None:
     asset = RecordedTestAsset(
         id="asset_spreadsheet",

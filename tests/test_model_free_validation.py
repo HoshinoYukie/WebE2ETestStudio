@@ -3,7 +3,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from web_e2e_test_studio.desktop.validation import ModelFreeValidator
+from web_e2e_test_studio.desktop.validation import (
+    ModelFreeValidator,
+    StepValidationEvent,
+)
 
 
 def test_model_free_validator_runs_exact_export_without_model_credentials(
@@ -15,12 +18,21 @@ def test_model_free_validator_runs_exact_export_without_model_credentials(
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
     captured = {}
 
-    def fake_run(command, **options):  # noqa: ANN001, ANN202
+    class _Process:
+        stdout = iter(["1 passed\n"])
+
+        def wait(self, timeout=None):  # noqa: ANN001, ANN201
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    def fake_popen(command, **options):  # noqa: ANN001, ANN202
         captured["command"] = command
         captured["options"] = options
-        return subprocess.CompletedProcess(command, 0, "1 passed", "")
+        return _Process()
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
     result = ModelFreeValidator(timeout_seconds=12).run(
         test_path, workspace=tmp_path
@@ -29,13 +41,12 @@ def test_model_free_validator_runs_exact_export_without_model_credentials(
     assert result.passed is True
     assert result.exit_code == 0
     assert result.output == "1 passed"
-    assert captured["command"][3] == str(test_path.resolve())
+    assert str(test_path.resolve()) in captured["command"]
     options = captured["options"]
     assert "shell" not in options
     assert "VLM_API_KEY" not in options["env"]
     assert "OPENAI_API_KEY" not in options["env"]
     assert options["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
-    assert options["timeout"] == 12
 
 
 def test_model_free_validator_reports_pytest_failure(
@@ -44,13 +55,16 @@ def test_model_free_validator_reports_pytest_failure(
     test_path = tmp_path / "test_exported.py"
     test_path.write_text("def test_exported():\n    assert False\n", encoding="utf-8")
 
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **options: subprocess.CompletedProcess(  # noqa: ARG005
-            command, 1, "FAILED test_exported.py", "assert False"
-        ),
-    )
+    class _FailedProcess:
+        stdout = iter(["FAILED test_exported.py\n", "assert False\n"])
+
+        def wait(self, timeout=None):  # noqa: ANN001, ANN201
+            return 1
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: _FailedProcess())
 
     result = ModelFreeValidator().run(test_path, workspace=tmp_path)
 
@@ -76,3 +90,28 @@ def test_model_free_validator_executes_a_real_standalone_pytest(
     assert result.passed is True
     assert result.exit_code == 0
     assert "1 passed" in result.output
+
+
+def test_model_free_validator_streams_and_collects_step_events(
+    tmp_path: Path,
+) -> None:
+    test_path = tmp_path / "test_steps.py"
+    test_path.write_text(
+        "def test_steps():\n"
+        "    print('__WEB_E2E_STEP__|running|step_1|navigate', flush=True)\n"
+        "    print('__WEB_E2E_STEP__|passed|step_1|navigate', flush=True)\n",
+        encoding="utf-8",
+    )
+    events = []
+
+    result = ModelFreeValidator(timeout_seconds=30).run(
+        test_path,
+        workspace=tmp_path,
+        event_sink=events.append,
+    )
+
+    assert [event.status for event in events] == ["running", "passed"]
+    assert result.steps == (
+        StepValidationEvent("step_1", "navigate", "passed"),
+    )
+    assert "__WEB_E2E_STEP__" not in result.output

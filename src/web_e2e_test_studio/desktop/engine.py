@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,20 +47,28 @@ from web_e2e_test_studio.desktop.recovery import (
 from web_e2e_test_studio.desktop.validation import (
     ModelFreeValidationResult,
     ModelFreeValidator,
+    StepValidationEvent,
 )
 from web_e2e_test_studio.domain import (
     Action,
     ActionChannel,
     ActionResult,
+    JsonValue,
     Observation,
     RecordedStep,
     StepSource,
+    utc_now,
 )
 from web_e2e_test_studio.exporters import PytestExporter
 from web_e2e_test_studio.recording import RecordingSession
 from web_e2e_test_studio.recording.manual import BrowserEventRecorder
 from web_e2e_test_studio.storage import JsonAssetStore
 from web_e2e_test_studio.tools import ExternalToolRegistry
+from web_e2e_test_studio.variables import (
+    VariableDefinition,
+    VariableRegistry,
+    VLMVariableDefinitionCompiler,
+)
 
 
 @dataclass(frozen=True)
@@ -88,6 +96,7 @@ class DesktopRecordingSnapshot:
     output_path: Path
     pages: tuple[BrowserPageInfo, ...] = ()
     active_page_id: str = ""
+    variables: tuple[dict[str, str], ...] = ()
 
     @property
     def step_count(self) -> int:
@@ -105,6 +114,7 @@ class DesktopRecordingEngine:
         recorder: Any | None = None,
         planner_factory: Callable[[], Planner] | None = None,
         validator: ModelFreeValidator | None = None,
+        variable_compiler: Callable[[str, str], VariableDefinition] | None = None,
     ) -> None:
         self._config = config
         self._asset_path = config.asset_path.resolve()
@@ -144,6 +154,10 @@ class DesktopRecordingEngine:
         self._actions = _build_action_registry(self, self._tools)
         self._active_cancellation: CancellationToken | None = None
         self._validator = validator or ModelFreeValidator()
+        self._variable_compiler = variable_compiler or _compile_variable_from_env
+        self._variables = VariableRegistry(
+            definition_compiler=self._variable_compiler
+        )
         self._preview_listener: Callable[[Observation, str], None] | None = None
 
     def start(self) -> DesktopRecordingSnapshot:
@@ -153,9 +167,7 @@ class DesktopRecordingEngine:
         for tool_path in self._config.tools:
             self._tools.register_path(tool_path, authorized=True)
         self._actions = _build_action_registry(self, self._tools)
-        self._session.asset.tool_dependencies.update(
-            self._tools.tool_dependencies()
-        )
+        self._session.asset.tool_dependencies.update(self._tools.tool_dependencies())
         self._running = True
         try:
             if self._config.url:
@@ -176,8 +188,7 @@ class DesktopRecordingEngine:
                 )
                 if step is None:
                     raise RuntimeError(
-                        "Initial navigation could not be verified: "
-                        f"{self._config.url}"
+                        f"Initial navigation could not be verified: {self._config.url}"
                     )
             return self.save()
         except Exception:
@@ -188,14 +199,21 @@ class DesktopRecordingEngine:
         """Restore verified state and reopen the last known browser page."""
         if self._running:
             raise RuntimeError("The recording session is already running")
-        checkpoint = self._checkpoint_store.load(
-            self._asset_path.with_suffix(".run.json")
-        )
+        checkpoint = self._checkpoint_store.load(self._asset_path.with_suffix(".run.json"))
         if checkpoint.asset_path != self._asset_path:
             raise ValueError("Checkpoint asset does not match this session")
         self._checkpoint = checkpoint
-        self._session = RecordingSession(
-            asset=self._store.load(self._asset_path)
+        self._session = RecordingSession(asset=self._store.load(self._asset_path))
+        raw_definitions = self._session.asset.metadata.get("variable_definitions", [])
+        self._variables = VariableRegistry(
+            tuple(
+                VariableDefinition.from_dict(item)
+                for item in raw_definitions
+                if isinstance(item, dict)
+            )
+            if isinstance(raw_definitions, list)
+            else (),
+            definition_compiler=self._variable_compiler,
         )
         self._running = True
         try:
@@ -210,15 +228,9 @@ class DesktopRecordingEngine:
                     )
                 )
                 if not result.success:
-                    raise RuntimeError(
-                        f"Could not restore browser page: {result.error}"
-                    )
+                    raise RuntimeError(f"Could not restore browser page: {result.error}")
             self._checkpoint = self._checkpoint.updated(
-                state=(
-                    "waiting_for_user"
-                    if self._checkpoint.pending_question
-                    else "active"
-                )
+                state=("waiting_for_user" if self._checkpoint.pending_question else "active")
             )
             return self.save()
         except Exception as exc:
@@ -257,20 +269,17 @@ class DesktopRecordingEngine:
         if not instruction.strip():
             raise ValueError("The VLM instruction cannot be empty")
         response_text = instruction.strip()
-        original_instruction = (
-            self._checkpoint.active_instruction or response_text
-        )
-        text = response_text
-        if (
-            self._checkpoint.pending_question
-            and self._checkpoint.active_instruction
-        ):
+        original_instruction = self._checkpoint.active_instruction or response_text
+        text = str(self._variables.resolve(response_text))
+        first_new_step = len(self._session.asset.steps)
+        if self._checkpoint.pending_question and self._checkpoint.active_instruction:
             text = (
                 f"Continue the original request:\n{original_instruction}\n\n"
                 "The agent previously asked:\n"
                 f"{self._checkpoint.pending_question}\n\n"
                 f"User response:\n{response_text}"
             )
+        text = str(self._variables.resolve(text))
         self._checkpoint = self._checkpoint.updated(
             state="running",
             active_instruction=original_instruction,
@@ -300,27 +309,16 @@ class DesktopRecordingEngine:
                 changes["pending_question"] = question
             memory = event.payload.get("memory")
             if isinstance(memory, str) and memory.strip():
-                changes["memories"] = tuple(dict.fromkeys(
-                    (*self._checkpoint.memories, memory.strip())
-                ))[-100:]
+                changes["memories"] = tuple(
+                    dict.fromkeys((*self._checkpoint.memories, memory.strip()))
+                )[-100:]
             task_id = event.payload.get("task_id")
             lifecycle = event.payload.get("lifecycle")
             event_failure = event.payload.get("failure")
-            if (
-                not task_id
-                and isinstance(event_failure, dict)
-            ):
-                changes["last_failure"] = TaskFailure.from_dict(
-                    event_failure
-                )
-            if (
-                isinstance(task_id, str)
-                and task_id
-                and isinstance(lifecycle, dict)
-            ):
-                task_lifecycles = dict(
-                    self._checkpoint.task_lifecycles
-                )
+            if not task_id and isinstance(event_failure, dict):
+                changes["last_failure"] = TaskFailure.from_dict(event_failure)
+            if isinstance(task_id, str) and task_id and isinstance(lifecycle, dict):
+                task_lifecycles = dict(self._checkpoint.task_lifecycles)
                 task_lifecycles[task_id] = TaskStateSnapshot.from_dict(
                     {
                         "lifecycle": lifecycle,
@@ -351,10 +349,7 @@ class DesktopRecordingEngine:
                 initial_memories=self._checkpoint.memories,
             )
         except Exception as exc:
-            failure = (
-                self._checkpoint.last_failure
-                or classify_exception(exc)
-            )
+            failure = self._checkpoint.last_failure or classify_exception(exc)
             self._checkpoint = self._checkpoint.updated(
                 state="failed",
                 last_error=str(exc),
@@ -372,17 +367,15 @@ class DesktopRecordingEngine:
         self._checkpoint = self._checkpoint.updated(
             state=checkpoint_state,
             active_instruction=(
-                original_instruction
-                if result_status in {"waiting_for_user", "cancelled"}
-                else ""
+                original_instruction if result_status in {"waiting_for_user", "cancelled"} else ""
             ),
             pending_question=result.question,
         )
+        self.save()
+        self._restore_variable_references(first_new_step)
         snapshot = self.save()
         for event in deferred_done_events:
-            self._checkpoint = self._checkpoint.with_event(
-                event.kind, event.payload
-            )
+            self._checkpoint = self._checkpoint.with_event(event.kind, event.payload)
             self._persist_checkpoint()
             if event_sink is not None:
                 event_sink(event)
@@ -401,14 +394,10 @@ class DesktopRecordingEngine:
         self._require_running()
         self._tools.register_path(path, authorized=True)
         self._actions = _build_action_registry(self, self._tools)
-        self._session.asset.tool_dependencies.update(
-            self._tools.tool_dependencies()
-        )
+        self._session.asset.tool_dependencies.update(self._tools.tool_dependencies())
         return self.save()
 
-    def run_tool(
-        self, tool_ref: str, arguments: Sequence[str] = ()
-    ) -> DesktopRecordingSnapshot:
+    def run_tool(self, tool_ref: str, arguments: Sequence[str] = ()) -> DesktopRecordingSnapshot:
         """Execute a registered tool and record its verified result."""
         self._require_running()
         _run_external_action(
@@ -420,9 +409,7 @@ class DesktopRecordingEngine:
             verifier=self._verifier,
             tools=self._tools,
         )
-        self._session.asset.tool_dependencies.update(
-            self._tools.tool_dependencies()
-        )
+        self._session.asset.tool_dependencies.update(self._tools.tool_dependencies())
         return self.save()
 
     def run_http_request(
@@ -431,16 +418,20 @@ class DesktopRecordingEngine:
     ) -> DesktopRecordingSnapshot:
         """Execute and record a user-authored HTTP request."""
         self._require_running()
-        method = str(request.get("method", "")).strip().upper()
-        url = str(request.get("url", "")).strip()
-        expected_status = request.get("expected_status", 200)
+        resolved_value = self._variables.resolve(request)
+        if not isinstance(resolved_value, dict):
+            raise TypeError("Resolved HTTP request must be an object")
+        resolved_request = dict(resolved_value)
+        method = str(resolved_request.get("method", "")).strip().upper()
+        url = str(resolved_request.get("url", "")).strip()
+        expected_status = resolved_request.get("expected_status", 200)
         attempt_count = len(self._session.attempts)
         step = _execute_and_record(
             session=self._session,
             action=Action(
                 name="http_request",
                 channel=ActionChannel.API,
-                arguments=dict(request),
+                arguments=resolved_request,
             ),
             intent=f"Send {method} request to {url}",
             expected_result=f"The API returns HTTP {expected_status}",
@@ -453,15 +444,28 @@ class DesktopRecordingEngine:
             reason = "The request did not produce a verified result"
             if len(self._session.attempts) > attempt_count:
                 attempt = self._session.attempts[-1]
-                reason = (
-                    attempt.result.error
-                    or attempt.verification.reason
-                    or reason
-                )
-            raise RuntimeError(
-                f"HTTP request was not recorded: {method} {url}: {reason}"
+                reason = attempt.result.error or attempt.verification.reason or reason
+            raise RuntimeError(f"HTTP request was not recorded: {method} {url}: {reason}")
+        if self._variables.referenced_names(request):
+            original_action = Action(
+                name="http_request",
+                channel=ActionChannel.API,
+                arguments=dict(request),
             )
+            for index, recorded in enumerate(self._session.asset.steps):
+                if recorded.id == step.id:
+                    self._session.asset.steps[index] = replace(recorded, action=original_action)
+                    break
         return self.save()
+
+    def define_variable(
+        self, name: str, description: str
+    ) -> tuple[VariableDefinition, str, DesktopRecordingSnapshot]:
+        """Create a portable generator rule and a session preview value."""
+        self._require_running()
+        definition, value = self._variables.define(name, description)
+        self._persist_variable_definitions()
+        return definition, value, self.save()
 
     def import_and_launch_tool(
         self, path: str | Path, arguments: Sequence[str] = ()
@@ -481,9 +485,7 @@ class DesktopRecordingEngine:
             verifier=self._verifier,
             tools=self._tools,
         )
-        self._session.asset.tool_dependencies.update(
-            self._tools.tool_dependencies()
-        )
+        self._session.asset.tool_dependencies.update(self._tools.tool_dependencies())
         return self.save()
 
     def save(self) -> DesktopRecordingSnapshot:
@@ -498,22 +500,44 @@ class DesktopRecordingEngine:
         )
         self._last_observation = self.observe()
         if self._last_observation.url:
-            self._checkpoint = self._checkpoint.updated(
-                last_url=self._last_observation.url
-            )
+            self._checkpoint = self._checkpoint.updated(last_url=self._last_observation.url)
         self._persist_checkpoint()
         return self.snapshot()
 
     def validate_export(
         self,
+        event_sink: Callable[[StepValidationEvent], None] | None = None,
     ) -> tuple[ModelFreeValidationResult, DesktopRecordingSnapshot]:
         """Regenerate and execute the exported test without model access."""
-        snapshot = self.save()
+        self.save()
         result = self._validator.run(
             self._output_path,
             workspace=self._workspace,
+            event_sink=event_sink,
         )
-        return result, snapshot
+        validation_record: dict[str, JsonValue] = {
+            "kind": "model_free_validation",
+            "validated_at": utc_now(),
+            "status": "passed" if result.passed else "failed",
+            "exit_code": result.exit_code,
+            "duration_seconds": result.duration_seconds,
+            "test_path": str(result.test_path),
+            "steps": [
+                {
+                    "step_id": step.step_id,
+                    "action": step.action,
+                    "status": step.status,
+                }
+                for step in result.steps
+            ],
+        }
+        self._session.asset.execution_history.append(validation_record)
+        self._session.asset.metadata["validation_status"] = (
+            "replay_verified" if result.passed else "replay_failed"
+        )
+        self._session.asset.metadata["last_validation"] = validation_record
+        self._store.save(self._session.asset, self._asset_path)
+        return result, self.snapshot()
 
     def stop(self) -> DesktopRecordingSnapshot:
         """Close the owned browser and return the final state."""
@@ -533,23 +557,17 @@ class DesktopRecordingEngine:
         if not self._browser_started:
             return self.snapshot()
         preview = getattr(self._device, "preview", None)
-        self._last_observation = (
-            preview() if callable(preview) else self.observe()
-        )
+        self._last_observation = preview() if callable(preview) else self.observe()
         return self.snapshot()
 
-    def set_preview_listener(
-        self, listener: Callable[[Observation, str], None]
-    ) -> None:
+    def set_preview_listener(self, listener: Callable[[Observation, str], None]) -> None:
         """Publish CDP frames independently from Desktop command polling."""
         self._preview_listener = listener
         add_listener = getattr(self._device, "add_preview_listener", None)
         if callable(add_listener):
             add_listener(self._handle_preview_frame)
 
-    def _handle_preview_frame(
-        self, observation: Observation, page_id: str
-    ) -> None:
+    def _handle_preview_frame(self, observation: Observation, page_id: str) -> None:
         self._last_observation = observation
         if self._preview_listener is not None:
             self._preview_listener(observation, page_id)
@@ -577,9 +595,7 @@ class DesktopRecordingEngine:
             ),
         )
 
-    def capture_context(
-        self, request: ContextRequest | None = None
-    ) -> UIContext:
+    def capture_context(self, request: ContextRequest | None = None) -> UIContext:
         """Expose the rich context seam while keeping browser startup lazy."""
         if not self._browser_started:
             return UIContext()
@@ -639,11 +655,7 @@ class DesktopRecordingEngine:
 
     def snapshot(self) -> DesktopRecordingSnapshot:
         pages_method = getattr(self._device, "pages", None)
-        pages = (
-            tuple(pages_method())
-            if self._browser_started and callable(pages_method)
-            else ()
-        )
+        pages = tuple(pages_method()) if self._browser_started and callable(pages_method) else ()
         active_page_id = next(
             (page.id for page in pages if page.active),
             "",
@@ -656,7 +668,31 @@ class DesktopRecordingEngine:
             output_path=self._output_path,
             pages=pages,
             active_page_id=active_page_id,
+            variables=tuple(
+                {
+                    "name": definition.name,
+                    "description": definition.description,
+                    "value": self._variables.values()[definition.name],
+                    "reference": f"${{VAR:{definition.name}}}",
+                }
+                for definition in self._variables.definitions()
+            ),
         )
+
+    def _persist_variable_definitions(self) -> None:
+        self._session.asset.metadata["variable_definitions"] = [
+            definition.to_dict() for definition in self._variables.definitions()
+        ]
+
+    def _restore_variable_references(self, first_step: int) -> None:
+        for index in range(first_step, len(self._session.asset.steps)):
+            step = self._session.asset.steps[index]
+            restored = self._variables.restore_references(step.action.arguments)
+            if isinstance(restored, dict):
+                self._session.asset.steps[index] = replace(
+                    step,
+                    action=replace(step.action, arguments=dict(restored)),
+                )
 
     def _require_running(self) -> None:
         if not self._running:
@@ -668,6 +704,11 @@ class DesktopRecordingEngine:
 
 def _planner_from_env() -> Planner:
     return StructuredVLMPlanner(OpenAICompatibleVLMBackend.from_env())
+
+
+def _compile_variable_from_env(name: str, description: str) -> VariableDefinition:
+    compiler = VLMVariableDefinitionCompiler(OpenAICompatibleVLMBackend.from_env(timeout=30))
+    return compiler.compile(name, description)
 
 
 __all__ = [

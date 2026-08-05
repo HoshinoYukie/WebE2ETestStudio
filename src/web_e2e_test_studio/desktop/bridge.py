@@ -235,6 +235,15 @@ class StudioBridge:
         self.controller.validate_export()
         return {"accepted": True}
 
+    def define_variable(self, payload: Any = None) -> dict[str, bool]:
+        config = _decode_object_payload(payload, "Generated variable")
+        name = str(config.get("name", "")).strip()
+        description = str(config.get("description", "")).strip()
+        if not name or not description:
+            raise ValueError("Variable name and format description are required")
+        self.controller.define_variable(name, description)
+        return {"accepted": True}
+
     def stop(self) -> dict[str, bool]:
         self.controller.stop()
         return {"accepted": True}
@@ -317,6 +326,7 @@ class StudioBridge:
                     "output_path": str(snapshot.output_path),
                     "observation": observation,
                     "active_page_id": snapshot.active_page_id,
+                    "variables": list(snapshot.variables),
                     "pages": [
                         {
                             "id": page.id,

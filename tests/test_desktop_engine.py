@@ -6,10 +6,14 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from web_e2e_test_studio.agent import ActionSpec
+from web_e2e_test_studio.agent import ActionRegistry, ActionSpec
 from web_e2e_test_studio.desktop.engine import (
     DesktopRecordingConfig,
     DesktopRecordingEngine,
+)
+from web_e2e_test_studio.desktop.validation import (
+    ModelFreeValidationResult,
+    StepValidationEvent,
 )
 from web_e2e_test_studio.domain import (
     Action,
@@ -18,6 +22,7 @@ from web_e2e_test_studio.domain import (
     Locator,
     Observation,
 )
+from web_e2e_test_studio.variables import VariableDefinition
 
 
 class FakePage:
@@ -320,3 +325,101 @@ def test_desktop_engine_runs_and_records_manual_http_request(
             "body": {"name": "book"},
         },
     ]
+
+
+def test_desktop_engine_persists_latest_model_free_validation(
+    tmp_path: Path,
+) -> None:
+    class _Validator:
+        def run(self, test_path, *, workspace, event_sink=None):  # noqa: ANN001, ANN201
+            event = StepValidationEvent("step_1", "navigate", "passed")
+            if event_sink is not None:
+                event_sink(event)
+            return ModelFreeValidationResult(
+                passed=True,
+                exit_code=0,
+                duration_seconds=0.5,
+                output="1 passed",
+                test_path=Path(test_path),
+                steps=(event,),
+            )
+
+    config = DesktopRecordingConfig(
+        url="",
+        goal="Validate export",
+        name="validation",
+        asset_path=tmp_path / "validation.json",
+        output_path=tmp_path / "test_validation.py",
+        workspace=tmp_path,
+    )
+    engine = DesktopRecordingEngine(
+        config,
+        device=FakeDevice(),
+        recorder=FakeRecorder(),
+        validator=_Validator(),  # type: ignore[arg-type]
+    )
+    engine.start()
+
+    result, _snapshot = engine.validate_export()
+    persisted = json.loads(config.asset_path.read_text(encoding="utf-8"))
+
+    assert result.passed is True
+    assert persisted["metadata"]["validation_status"] == "replay_verified"
+    assert persisted["metadata"]["last_validation"]["steps"] == [
+        {"step_id": "step_1", "action": "navigate", "status": "passed"}
+    ]
+    assert persisted["execution_history"][-1]["kind"] == ("model_free_validation")
+
+
+def test_desktop_engine_executes_generated_api_value_but_records_reference(
+    tmp_path: Path,
+) -> None:
+    class _ApiExecutor:
+        def __init__(self) -> None:
+            self.actions: list[Action] = []
+
+        def execute(self, action: Action) -> ActionResult:
+            self.actions.append(action)
+            return ActionResult.succeeded({"status": 201})
+
+    config = DesktopRecordingConfig(
+        url="",
+        goal="Use generated order ID",
+        name="generated_api",
+        asset_path=tmp_path / "generated_api.json",
+        output_path=tmp_path / "test_generated_api.py",
+        workspace=tmp_path,
+    )
+    engine = DesktopRecordingEngine(
+        config,
+        device=FakeDevice(),
+        recorder=FakeRecorder(),
+        variable_compiler=lambda name, description: VariableDefinition(
+            name, description, "digits", {"length": 8}
+        ),
+    )
+    engine.start()
+    _definition, preview, _snapshot = engine.define_variable("order_id", "8位数字")
+    executor = _ApiExecutor()
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec("http_request", ActionChannel.API, "Send HTTP request"),
+        executor,
+    )
+    engine._actions = registry  # noqa: SLF001
+
+    snapshot = engine.run_http_request(
+        {
+            "method": "POST",
+            "url": "https://api.test/orders/${VAR:order_id}",
+            "json": {"id": "${VAR:order_id}"},
+            "expected_status": 201,
+        }
+    )
+
+    assert executor.actions[0].arguments["url"] == (f"https://api.test/orders/{preview}")
+    assert executor.actions[0].arguments["json"] == {"id": preview}
+    assert snapshot.steps[-1].action.arguments["url"] == ("https://api.test/orders/${VAR:order_id}")
+    exported = config.output_path.read_text(encoding="utf-8")
+    assert "VARIABLES['order_id']" in exported
+    assert preview not in exported
