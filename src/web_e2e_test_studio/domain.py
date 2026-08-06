@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, cast
@@ -111,6 +111,124 @@ class Locator:
 
 
 @dataclass(frozen=True)
+class FrameRef:
+    """One deterministic hop from a document into a child frame."""
+
+    selector: str = ""
+    name: str = ""
+    url_hint: str = ""
+    index: int | None = None
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        data: dict[str, JsonValue] = {}
+        if self.selector:
+            data["selector"] = self.selector
+        if self.name:
+            data["name"] = self.name
+        if self.url_hint:
+            data["url_hint"] = self.url_hint
+        if self.index is not None:
+            data["index"] = self.index
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> FrameRef:
+        return cls(
+            selector=str(data.get("selector", "")),
+            name=str(data.get("name", "")),
+            url_hint=str(data.get("url_hint", "")),
+            index=int(data["index"]) if data.get("index") is not None else None,
+        )
+
+
+@dataclass(frozen=True)
+class ElementFingerprint:
+    """Stable semantic identity used when recorded locators drift."""
+
+    tag: str = ""
+    role: str = ""
+    accessible_name: str = ""
+    text: str = ""
+    attributes: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "tag": self.tag,
+            "role": self.role,
+            "accessible_name": self.accessible_name,
+            "text": self.text,
+            "attributes": dict(self.attributes),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ElementFingerprint:
+        raw_attributes = data.get("attributes", {})
+        return cls(
+            tag=str(data.get("tag", "")),
+            role=str(data.get("role", "")),
+            accessible_name=str(data.get("accessible_name", "")),
+            text=str(data.get("text", "")),
+            attributes=(
+                {str(key): str(value) for key, value in raw_attributes.items()}
+                if isinstance(raw_attributes, dict)
+                else {}
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ElementTarget:
+    """Portable identity of an element across tabs, frames, and DOM drift."""
+
+    page_ref: str = "main"
+    frame_path: tuple[FrameRef, ...] = ()
+    candidates: tuple[Locator, ...] = ()
+    fingerprint: ElementFingerprint = field(default_factory=ElementFingerprint)
+    element_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.candidates:
+            raise ValueError("ElementTarget requires at least one locator candidate")
+
+    @property
+    def locator(self) -> Locator:
+        primary, *fallbacks = self.candidates
+        return replace(primary, fallbacks=tuple((*primary.fallbacks, *fallbacks)))
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "page_ref": self.page_ref,
+            "frame_path": [frame.to_dict() for frame in self.frame_path],
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "fingerprint": self.fingerprint.to_dict(),
+            "element_id": self.element_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ElementTarget:
+        raw_fingerprint = data.get("fingerprint", {})
+        return cls(
+            page_ref=str(data.get("page_ref", "main")),
+            frame_path=tuple(
+                FrameRef.from_dict(item)
+                for item in data.get("frame_path", [])
+                if isinstance(item, dict)
+            ),
+            candidates=tuple(
+                Locator.from_dict(item)
+                for item in data.get("candidates", [])
+                if isinstance(item, dict)
+            ),
+            fingerprint=(
+                ElementFingerprint.from_dict(raw_fingerprint)
+                if isinstance(raw_fingerprint, dict)
+                else ElementFingerprint()
+            ),
+            element_id=str(data.get("element_id", "")),
+        )
+
+
+@dataclass(frozen=True)
 class Action:
     """A validated intent to call one registered deterministic action."""
 
@@ -120,8 +238,13 @@ class Action:
     locator: Locator | None = None
     tool_ref: str | None = None
     timeout_seconds: float | None = None
+    target: ElementTarget | None = None
 
     def __post_init__(self) -> None:
+        if self.target is None and self.locator is not None:
+            object.__setattr__(self, "target", ElementTarget(candidates=(self.locator,)))
+        elif self.target is not None:
+            object.__setattr__(self, "locator", self.target.locator)
         if (
             self.timeout_seconds is not None
             and (
@@ -139,6 +262,8 @@ class Action:
         }
         if self.locator is not None:
             data["locator"] = self.locator.to_dict()
+        if self.target is not None:
+            data["target"] = self.target.to_dict()
         if self.tool_ref is not None:
             data["tool_ref"] = self.tool_ref
         if self.timeout_seconds is not None:
@@ -151,6 +276,7 @@ class Action:
         if not isinstance(raw_arguments, dict):
             raise ValueError("Action arguments must be an object")
         raw_locator = data.get("locator")
+        raw_target = data.get("target")
         return cls(
             name=str(data["name"]),
             channel=ActionChannel(str(data["channel"])),
@@ -158,6 +284,11 @@ class Action:
             locator=(
                 Locator.from_dict(raw_locator)
                 if isinstance(raw_locator, dict)
+                else None
+            ),
+            target=(
+                ElementTarget.from_dict(raw_target)
+                if isinstance(raw_target, dict)
                 else None
             ),
             tool_ref=(
@@ -460,6 +591,9 @@ __all__ = [
     "ActionStatus",
     "AttemptRecord",
     "CandidateStatus",
+    "ElementFingerprint",
+    "ElementTarget",
+    "FrameRef",
     "JsonValue",
     "Locator",
     "Observation",

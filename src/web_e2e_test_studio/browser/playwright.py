@@ -19,11 +19,11 @@ from web_e2e_test_studio.agent.control import (
     ActionCancelledError,
     ActionExecutionContext,
 )
-from web_e2e_test_studio.browser.locator import (
-    LocatorEngine,
-    LocatorProbe,
-    LocatorResolution,
+from web_e2e_test_studio.browser.interaction import (
+    InteractionEngine,
+    InteractionResolution,
 )
+from web_e2e_test_studio.browser.locator import LocatorEngine, LocatorResolution
 from web_e2e_test_studio.context import (
     ContextEngine,
     ContextPurpose,
@@ -35,6 +35,7 @@ from web_e2e_test_studio.domain import (
     ActionChannel,
     ActionResult,
     ActionStatus,
+    ElementTarget,
     JsonValue,
     Locator,
     Observation,
@@ -83,6 +84,11 @@ class PlaywrightDevice:
         self._page: Any | None = page
         self._owns_browser = page is None
         self._locator_engine = locator_engine or LocatorEngine()
+        self._interaction_engine = InteractionEngine(
+            self._require_page,
+            lambda scope, locator: self._build_locator(locator, scope=scope),
+            locator_engine=self._locator_engine,
+        )
         self._last_observation = Observation()
         self._last_locator_resolution: LocatorResolution | None = None
         self._context_engine = ContextEngine(
@@ -582,7 +588,7 @@ class PlaywrightDevice:
                         page.wait_for_timeout(interval)
                         remaining -= interval
             else:
-                self._resolve_locator(action.locator).wait_for(
+                self._resolve_action_target(action).primary.wait_for(
                     state=str(arguments.get("state", "visible")),
                     timeout=float(milliseconds),
                 )
@@ -613,7 +619,7 @@ class PlaywrightDevice:
             timeout = arguments.get("timeout", 30_000)
             if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
                 raise ValueError("open_popup timeout must be numeric")
-            target = self._resolve_locator(action.locator)
+            target = self._resolve_action_target(action).primary
             with page.expect_popup(timeout=float(timeout)) as popup_info:
                 target.click(timeout=float(timeout))
             popup = popup_info.value
@@ -637,20 +643,21 @@ class PlaywrightDevice:
                 page.screenshot(**options)
             else:
                 options.pop("full_page", None)
-                self._resolve_locator(action.locator).screenshot(**options)
+                self._resolve_action_target(action).primary.screenshot(**options)
             path = arguments.get("path", "")
             return {
                 "action": action.name,
                 "path": str(path) if path is not None else "",
             }
 
-        target = self._resolve_locator(
-            action.locator,
+        interaction = self._resolve_action_target(
+            action,
             require_actionable=(
                 action.name in {"click", "download", "hover"}
                 and action.arguments.get("force") is not True
             ),
         )
+        target = interaction.primary
         if action.name == "extract_value":
             read = str(arguments.get("read", "text"))
             if read == "text":
@@ -670,18 +677,14 @@ class PlaywrightDevice:
                 "value": str(value),
             }
         if action.name == "click":
-            target.click(
-                **self._options(
+            self._click_with_fallback(
+                interaction,
+                self._options(
                     arguments,
-                    "button",
-                    "click_count",
-                    "delay",
-                    "force",
-                    "modifiers",
-                    "no_wait_after",
-                    "timeout",
-                    "trial",
-                )
+                    "button", "click_count", "delay", "force", "modifiers",
+                    "no_wait_after", "timeout", "trial",
+                ),
+                control,
             )
         elif action.name == "download":
             timeout = arguments.get("timeout", 30_000)
@@ -790,39 +793,69 @@ class PlaywrightDevice:
     ) -> Any:
         if locator is None:
             raise ValueError("This browser action requires a locator")
-        targets: dict[Locator, Any] = {}
+        return self._resolve_target(
+            ElementTarget(candidates=(locator,)),
+            require_actionable=require_actionable,
+        ).primary
 
-        def probe(candidate: Locator) -> LocatorProbe:
-            target = self._build_locator(candidate)
-            count = int(target.count())
-            if candidate.nth is not None and count > candidate.nth:
-                target = target.nth(candidate.nth)
-            targets[candidate] = target
-            is_visible = getattr(target, "is_visible", None)
-            is_enabled = getattr(target, "is_enabled", None)
-            actionable = True
-            if require_actionable and _is_playwright_locator(target):
-                try:
-                    target.click(trial=True, timeout=1_500)
-                except Exception:
-                    actionable = False
-            return LocatorProbe(
-                count=count,
-                visible=bool(is_visible()) if callable(is_visible) else True,
-                enabled=bool(is_enabled()) if callable(is_enabled) else True,
-                actionable=actionable,
-            )
+    def _resolve_action_target(
+        self,
+        action: Action,
+        *,
+        require_actionable: bool = False,
+    ) -> InteractionResolution:
+        target = action.target
+        if target is None:
+            raise ValueError("This browser action requires an element target")
+        return self._resolve_target(target, require_actionable=require_actionable)
 
-        resolution = self._locator_engine.resolve(
-            locator,
+    def _resolve_target(
+        self,
+        target: ElementTarget,
+        *,
+        require_actionable: bool = False,
+    ) -> InteractionResolution:
+        resolution = self._interaction_engine.resolve(
+            target,
             self._last_observation,
-            probe,
+            require_actionable=require_actionable,
         )
-        self._last_locator_resolution = resolution
-        return targets[resolution.selected]
+        self._last_locator_resolution = resolution.locator_resolution
+        return resolution
 
-    def _build_locator(self, locator: Locator) -> Any:
-        page = self._require_page()
+    def _click_with_fallback(
+        self,
+        interaction: InteractionResolution,
+        options: dict[str, JsonValue],
+        control: ActionExecutionContext | None,
+    ) -> None:
+        failures: list[str] = []
+        last_error: Exception | None = None
+        for candidate in interaction.candidates:
+            if control is not None:
+                control.raise_if_stopped()
+                remaining = control.remaining_seconds()
+                if remaining is not None:
+                    options["timeout"] = max(1.0, remaining * 1000)
+            try:
+                candidate.handle.click(**options)
+                if candidate.locator != interaction.locator_resolution.selected:
+                    self._last_locator_resolution = LocatorResolution(
+                        candidate.locator,
+                        interaction.locator_resolution.candidates,
+                    )
+                return
+            except Exception as exc:
+                last_error = exc
+                failures.append(f"{candidate.locator.strategy}: {exc}")
+        if last_error is None:
+            raise RuntimeError("No viable locator candidate was executed")
+        if len(failures) > 1:
+            last_error.add_note("Previous locator failures: " + " | ".join(failures[:-1]))
+        raise last_error
+
+    def _build_locator(self, locator: Locator, *, scope: Any | None = None) -> Any:
+        page = scope or self._require_page()
         if locator.strategy == "role":
             options: dict[str, Any] = {}
             if locator.name is not None:
@@ -890,11 +923,6 @@ class PlaywrightDevice:
         except ImportError:
             return False
         return isinstance(error, PlaywrightTimeout)
-
-
-def _is_playwright_locator(target: Any) -> bool:
-    module = str(getattr(target.__class__, "__module__", ""))
-    return module.startswith("playwright.")
 
 
 __all__ = ["PlaywrightDevice"]

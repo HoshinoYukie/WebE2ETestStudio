@@ -258,13 +258,41 @@ class ContextEngine:
         snapshot = dict(raw) if isinstance(raw, dict) else {}
         viewport = snapshot.get("viewport", {})
         raw_elements = snapshot.get("interactive_elements", [])
-        elements = tuple(
-            _sanitize_element(item)
-            for item in (
-                raw_elements[: self._max_elements]
-                if isinstance(raw_elements, list)
+        scoped_elements: list[dict[str, Any]] = []
+        if isinstance(raw_elements, list):
+            scoped_elements.extend(
+                {**item, "frame_path": []}
+                for item in raw_elements
+                if isinstance(item, dict)
+            )
+        page_frames = list(getattr(page, "frames", ()))
+        for frame in page_frames[1:]:
+            if len(scoped_elements) >= self._max_elements:
+                break
+            try:
+                frame_snapshot = frame.evaluate(_CAPTURE_SCRIPT)
+            except Exception:
+                continue
+            frame_elements = (
+                frame_snapshot.get("interactive_elements", [])
+                if isinstance(frame_snapshot, dict)
                 else []
             )
+            if not isinstance(frame_elements, list):
+                continue
+            frame_path = _frame_path(frame)
+            scoped_elements.extend(
+                {**item, "frame_path": frame_path}
+                for item in frame_elements
+                if isinstance(item, dict)
+            )
+        elements = tuple(
+            {
+                **_sanitize_element(item),
+                "element_id": f"e{index}",
+                "frame_path": item.get("frame_path", []),
+            }
+            for index, item in enumerate(scoped_elements[: self._max_elements], start=1)
             if isinstance(item, dict)
         )
         page_text = _sanitize_text(
@@ -370,6 +398,62 @@ def _pages(page: Any) -> list[Any]:
     context = getattr(page, "context", None)
     pages = getattr(context, "pages", None)
     return list(pages) if isinstance(pages, (list, tuple)) else [page]
+
+
+def _frame_path(frame: Any) -> list[dict[str, JsonValue]]:
+    """Build a codegen-style selector path from the main document to a frame."""
+    path: list[dict[str, JsonValue]] = []
+    current = frame
+    while current is not None:
+        parent = getattr(current, "parent_frame", None)
+        parent = parent() if callable(parent) else parent
+        if parent is None:
+            break
+        try:
+            element = current.frame_element()
+            raw = element.evaluate(
+                """element => {
+                  const escape = value => window.CSS?.escape
+                    ? CSS.escape(value)
+                    : String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+                  const id = element.getAttribute('id') || '';
+                  const testId = element.getAttribute('data-testid') || '';
+                  const name = element.getAttribute('name') || '';
+                  const frames = Array.from(
+                    element.ownerDocument.querySelectorAll('iframe,frame')
+                  );
+                  let selector = '';
+                  if (id) selector = `#${escape(id)}`;
+                  else if (testId) selector = `[data-testid="${testId}"]`;
+                  else if (name) selector = `iframe[name="${name}"],frame[name="${name}"]`;
+                  const matchingFrames = selector
+                    ? Array.from(element.ownerDocument.querySelectorAll(selector))
+                    : frames;
+                  return {
+                    selector,
+                    name,
+                    url_hint: element.getAttribute('src') || '',
+                    index: Math.max(0, matchingFrames.indexOf(element))
+                  };
+                }"""
+            )
+        except Exception:
+            raw = {
+                "name": str(getattr(current, "name", "")),
+                "url_hint": str(getattr(current, "url", "")),
+                "index": 0,
+            }
+        if isinstance(raw, dict):
+            path.insert(
+                0,
+                {
+                    str(key): value
+                    for key, value in raw.items()
+                    if isinstance(value, (str, int)) and not isinstance(value, bool)
+                },
+            )
+        current = parent
+    return path
 
 
 def _active_page_index(pages: list[Any], page: Any) -> int:

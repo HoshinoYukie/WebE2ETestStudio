@@ -11,6 +11,8 @@ from web_e2e_test_studio.browser import PlaywrightDevice
 from web_e2e_test_studio.domain import (
     Action,
     ActionChannel,
+    ElementTarget,
+    FrameRef,
     Locator,
     RecordedStep,
     StepSource,
@@ -166,6 +168,101 @@ def test_generated_pytest_runs_in_chromium_without_the_authoring_package(
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "1 passed" in completed.stdout
+
+
+@pytest.mark.skipif(
+    os.getenv("RUN_BROWSER_TESTS") != "1",
+    reason="set RUN_BROWSER_TESTS=1 after installing Playwright Chromium",
+)
+def test_frame_target_observes_executes_and_exports_without_model(tmp_path: Path) -> None:
+    inner = tmp_path / "embedded.html"
+    inner.write_text(
+        """<!doctype html>
+<a href="#" onclick="document.querySelector('[role=status]').hidden=false;return false">
+  Create Proposal
+</a>
+<div role="status" hidden>Proposal opened</div>
+""",
+        encoding="utf-8",
+    )
+    outer = tmp_path / "shell.html"
+    outer.write_text(
+        f'<iframe id="content-frame" src="{inner.as_uri()}"></iframe>',
+        encoding="utf-8",
+    )
+    target = ElementTarget(
+        frame_path=(FrameRef(selector="#content-frame"),),
+        candidates=(Locator("role", "link", name="Create Proposal"),),
+    )
+    device = PlaywrightDevice(headless=True)
+    try:
+        device.start()
+        device.execute(Action("navigate", ActionChannel.BROWSER, {"url": outer.as_uri()}))
+        observation = device.observe()
+        click_result = device.execute(
+            Action("click", ActionChannel.BROWSER, target=target)
+        )
+    finally:
+        device.close()
+
+    indexed = next(
+        item
+        for item in observation.interactive_elements
+        if item.get("name") == "Create Proposal"
+    )
+    assert indexed["element_id"]
+    assert indexed["frame_path"][0]["selector"] == "#content-frame"
+    assert click_result.success
+
+    asset = Asset(
+        id="asset_frame",
+        name="Frame replay",
+        goal="Open proposal",
+        steps=[
+            _step(
+                "s1",
+                Action("navigate", ActionChannel.BROWSER, {"url": outer.as_uri()}),
+            ),
+            _step("s2", Action("click", ActionChannel.BROWSER, target=target)),
+            _step(
+                "s3",
+                Action(
+                    "assert_text",
+                    ActionChannel.BROWSER,
+                    {"text": "Proposal opened"},
+                    target=ElementTarget(
+                        frame_path=(FrameRef(selector="#content-frame"),),
+                        candidates=(Locator("role", "status"),),
+                    ),
+                ),
+            ),
+        ],
+    )
+    generated = PytestExporter().export(asset, tmp_path / "test_frame_replay.py")
+    environment = os.environ.copy()
+    environment.pop("VLM_API_KEY", None)
+    environment.pop("OPENAI_API_KEY", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(generated),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "--basetemp",
+            str(tmp_path / "frame-replay-temp"),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 @pytest.mark.skipif(

@@ -156,6 +156,61 @@ def test_vlm_planner_parses_and_reinjects_working_memory() -> None:
     assert second_prompt["working_memory"] == ["Downloaded file is C:\\downloads\\devices.xlsx"]
 
 
+def test_vlm_planner_resolves_indexed_element_to_portable_target() -> None:
+    planner = StructuredVLMPlanner(
+        FakeBackend(
+            {
+                "status": "actions",
+                "actions": [
+                    {
+                        "intent": "Create a proposal",
+                        "expected_result": "Proposal form opens",
+                        "action": {
+                            "name": "click",
+                            "channel": "browser",
+                            "arguments": {},
+                            "element_id": "e17",
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    observation = Observation(
+        interactive_elements=(
+            {
+                "element_id": "e17",
+                "tag": "a",
+                "role": "link",
+                "name": "Create Proposal",
+                "text": "Create Proposal",
+                "test_id": "create-proposal",
+                "frame_path": [{"selector": "#content-frame"}],
+            },
+        )
+    )
+
+    plan = planner.plan(
+        "Create a proposal",
+        observation,
+        [],
+        [ActionSpec("click", ActionChannel.BROWSER, "Click", locator_required=True)],
+    )
+
+    action = plan.planned_actions[0].action
+    assert action.target is not None
+    assert action.target.element_id == "e17"
+    assert action.target.frame_path[0].selector == "#content-frame"
+    assert action.locator == Locator(
+        "test_id",
+        "create-proposal",
+        fallbacks=(
+            Locator("role", "link", name="Create Proposal"),
+            Locator("text", "Create Proposal"),
+        ),
+    )
+
+
 def test_open_remembered_link_uses_exact_url_instead_of_visual_guess() -> None:
     planner = StructuredVLMPlanner(
         FakeBackend(

@@ -438,7 +438,7 @@ class PytestExporter:
             return f"pages[{page_ref!r}].close()\npages.pop({page_ref!r})"
         if name == "open_popup":
             page_ref = _string_argument(action, "page_ref")
-            target = _locator_expression(_required_locator(action))
+            target = _target_expression(action)
             timeout = _optional_number_argument(action, "timeout")
             timeout_option = f"timeout={_number_literal(timeout)}" if timeout is not None else ""
             return (
@@ -449,7 +449,7 @@ class PytestExporter:
                 "page.wait_for_load_state()"
             )
 
-        target = _locator_expression(_required_locator(action))
+        target = _target_expression(action)
         operation_options = _browser_timeout_options(action)
         if name == "extract_value":
             variable_name = _string_argument(action, "variable_name")
@@ -549,7 +549,7 @@ class PytestExporter:
     def _render_wait(self, action: Action) -> str:
         duration = resolve_wait_milliseconds(action)
         if action.locator is not None:
-            target = _locator_expression(action.locator)
+            target = _target_expression(action)
             keyword_arguments: list[str] = []
             state = action.arguments.get("state")
             if state is not None:
@@ -575,7 +575,7 @@ class PytestExporter:
             if action.locator is not None:
                 raise ValueError("full_page is only supported for page screenshots")
             arguments.append(f"full_page={full_page!r}")
-        target = _locator_expression(action.locator) if action.locator is not None else "page"
+        target = _target_expression(action) if action.locator is not None else "page"
         return f"{target}.screenshot({', '.join(arguments)})"
 
     def _render_external_action(
@@ -810,33 +810,54 @@ def _required_locator(action: Action) -> Locator:
     return action.locator
 
 
-def _locator_expression(locator: Locator) -> str:
+def _target_expression(action: Action) -> str:
+    locator = _required_locator(action)
+    base = "page"
+    if action.target is not None:
+        for frame in action.target.frame_path:
+            if frame.selector:
+                base = f"{base}.frame_locator({frame.selector!r})"
+                if frame.index is not None:
+                    base = f"{base}.nth({frame.index})"
+            elif frame.name:
+                frame_selector = f"iframe[name={frame.name!r}],frame[name={frame.name!r}]"
+                base = f"{base}.frame_locator({frame_selector!r})"
+            elif frame.index is not None:
+                base = f"{base}.frame_locator('iframe,frame').nth({frame.index})"
+            else:
+                raise ValueError("Frame target requires selector, name, or index")
+    return _locator_expression(locator, base=base)
+
+
+def _locator_expression(locator: Locator, *, base: str = "page") -> str:
     strategy = locator.strategy.casefold().replace("-", "_")
     if strategy == "role":
         arguments = [repr(locator.value)]
         if locator.name is not None:
             arguments.append(f"name={locator.name!r}")
         arguments.append(f"exact={locator.exact!r}")
-        expression = f"page.get_by_role({', '.join(arguments)})"
+        expression = f"{base}.get_by_role({', '.join(arguments)})"
     elif strategy == "label":
-        expression = f"page.get_by_label({locator.value!r}, exact={locator.exact!r})"
+        expression = f"{base}.get_by_label({locator.value!r}, exact={locator.exact!r})"
     elif strategy == "text":
-        expression = f"page.get_by_text({locator.value!r}, exact={locator.exact!r})"
+        expression = f"{base}.get_by_text({locator.value!r}, exact={locator.exact!r})"
     elif strategy == "placeholder":
-        expression = f"page.get_by_placeholder({locator.value!r}, exact={locator.exact!r})"
+        expression = f"{base}.get_by_placeholder({locator.value!r}, exact={locator.exact!r})"
     elif strategy in {"test_id", "testid"}:
-        expression = f"page.get_by_test_id({locator.value!r})"
+        expression = f"{base}.get_by_test_id({locator.value!r})"
     elif strategy in {"css", "xpath", "selector"}:
-        expression = f"page.locator({locator.value!r})"
+        expression = f"{base}.locator({locator.value!r})"
     elif strategy in {"alt_text", "alt"}:
-        expression = f"page.get_by_alt_text({locator.value!r}, exact={locator.exact!r})"
+        expression = f"{base}.get_by_alt_text({locator.value!r}, exact={locator.exact!r})"
     elif strategy == "title":
-        expression = f"page.get_by_title({locator.value!r}, exact={locator.exact!r})"
+        expression = f"{base}.get_by_title({locator.value!r}, exact={locator.exact!r})"
     else:
         raise ValueError(f"Unsupported locator strategy: {locator.strategy!r}")
 
     if locator.fallbacks:
-        alternatives = [_locator_expression(fallback) for fallback in locator.fallbacks]
+        alternatives = [
+            _locator_expression(fallback, base=base) for fallback in locator.fallbacks
+        ]
         expression = (
             "("
             + expression

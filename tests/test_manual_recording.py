@@ -7,6 +7,7 @@ from web_e2e_test_studio.domain import (
     Action,
     ActionChannel,
     ActionStatus,
+    FrameRef,
     Locator,
 )
 from web_e2e_test_studio.recording.manual import (
@@ -52,6 +53,37 @@ def test_manual_click_prefers_accessible_locator_with_ordered_fallbacks() -> Non
         "css",
         "xpath",
     ]
+
+
+def test_manual_click_records_frame_path_and_element_fingerprint() -> None:
+    action = ManualEventCompiler().compile(
+        (
+            {
+                "type": "click",
+                "frame_path": [
+                    {"selector": "#content-frame", "name": "content", "index": 0}
+                ],
+                "target": {
+                    "tag": "a",
+                    "role": "link",
+                    "name": "Create Proposal",
+                    "text": "Create Proposal",
+                    "test_id": "create-proposal",
+                    "css": "a.create-proposal",
+                    "xpath": "/html/body/a",
+                },
+            },
+        )
+    )[0]
+
+    assert action.target is not None
+    assert action.target.frame_path == (
+        FrameRef(selector="#content-frame", name="content", index=0),
+    )
+    assert action.target.fingerprint.accessible_name == "Create Proposal"
+    assert action.target.fingerprint.attributes == {
+        "data-testid": "create-proposal"
+    }
 
 
 def test_manual_compiler_coalesces_consecutive_input_for_the_same_field() -> None:
@@ -385,7 +417,14 @@ def test_playwright_device_observes_serializable_page_state() -> None:
     assert observation.url == "https://example.test/dashboard"
     assert observation.title == "Dashboard"
     assert observation.viewport == {"width": 1280, "height": 720}
-    assert observation.interactive_elements == ({"tag": "button", "text": "Create report"},)
+    assert observation.interactive_elements == (
+        {
+            "tag": "button",
+            "text": "Create report",
+            "element_id": "e1",
+            "frame_path": [],
+        },
+    )
     assert observation.page_text == "Reports Create report"
 
 
@@ -501,6 +540,52 @@ def test_playwright_device_uses_locator_fallback_and_nth() -> None:
         ("nth", "test_id", 2),
         ("click", "test_id.nth(2)"),
     ]
+
+
+def test_playwright_device_retries_next_viable_locator_after_real_click_failure() -> None:
+    calls: list[str] = []
+
+    class Candidate:
+        def __init__(self, name: str, *, fails: bool = False) -> None:
+            self.name = name
+            self.fails = fails
+
+        def count(self) -> int:
+            return 1
+
+        def is_visible(self) -> bool:
+            return True
+
+        def is_enabled(self) -> bool:
+            return True
+
+        def click(self, **_options) -> None:  # noqa: ANN003
+            calls.append(self.name)
+            if self.fails:
+                raise RuntimeError("detached during click")
+
+    class Page:
+        def get_by_role(self, *_args, **_options) -> Candidate:  # noqa: ANN002, ANN003
+            return Candidate("role")
+
+        def get_by_test_id(self, _value: str) -> Candidate:
+            return Candidate("test_id", fails=True)
+
+    result = PlaywrightDevice(page=Page()).execute(
+        Action(
+            "click",
+            ActionChannel.BROWSER,
+            locator=Locator(
+                "test_id",
+                "save",
+                fallbacks=(Locator("role", "button", name="Save"),),
+            ),
+        )
+    )
+
+    assert result.success
+    assert calls == ["test_id", "role"]
+    assert result.output["locator_resolution"]["selected"]["strategy"] == "role"
 
 
 class FakeExecutionLocator:

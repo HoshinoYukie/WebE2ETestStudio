@@ -25,6 +25,10 @@ from web_e2e_test_studio.domain import (
     Action,
     ActionChannel,
     ActionStatus,
+    ElementFingerprint,
+    ElementTarget,
+    FrameRef,
+    JsonValue,
     Locator,
     Observation,
     VerificationStatus,
@@ -71,6 +75,7 @@ class StructuredVLMPlanner:
             user_prompt,
             observation.screenshot_path,
             actions,
+            observation,
         )
         plan = _apply_remembered_link_policy(
             plan,
@@ -105,6 +110,7 @@ class StructuredVLMPlanner:
                 user_prompt + correction,
                 observation.screenshot_path,
                 actions,
+                observation,
             )
             plan = _apply_managed_download_policy(plan, request, actions)
             plan = _apply_spreadsheet_extraction_policy(
@@ -134,6 +140,7 @@ class StructuredVLMPlanner:
                 user_prompt + correction,
                 observation.screenshot_path,
                 actions,
+                observation,
             )
             plan = _apply_managed_download_policy(plan, request, actions)
             plan = _apply_spreadsheet_extraction_policy(
@@ -155,6 +162,7 @@ class StructuredVLMPlanner:
         user_prompt: str,
         screenshot_path: str,
         actions: Sequence[ActionSpec],
+        observation: Observation,
     ) -> PlanningResult:
         try:
             raw = self._backend.complete_json(
@@ -162,7 +170,7 @@ class StructuredVLMPlanner:
                 user_prompt,
                 screenshot_path,
             )
-            return _parse_plan(raw, actions)
+            return _parse_plan(raw, actions, observation.interactive_elements)
         except PlannerProtocolError as first_error:
             correction = (
                 "\n\nPROTOCOL CORRECTION: Your previous response was rejected: "
@@ -175,7 +183,7 @@ class StructuredVLMPlanner:
                 user_prompt + correction,
                 screenshot_path,
             )
-            return _parse_plan(raw, actions)
+            return _parse_plan(raw, actions, observation.interactive_elements)
 
 
 class OpenAICompatibleVLMBackend:
@@ -301,15 +309,15 @@ def _system_prompt(actions: Sequence[ActionSpec]) -> str:
         "You assist with recording a deterministic Web E2E test. "
         "Return a short ordered list of registered actions, ask one blocking "
         "question, or declare the requested goal complete. Never emit Python, "
-        "JavaScript, shell "
-        "commands, hidden selectors, or an unregistered action. Use stable "
-        "Playwright locators in this order when available: test_id, role+name, "
-        "label, text, css, xpath. Return one JSON object matching one of:\n"
+        "JavaScript, shell commands, hidden selectors, or an unregistered action. "
+        "For browser actions, select an element_id from observation.interactive_elements. "
+        "Do not invent a locator when an indexed element is available. Return one JSON "
+        "object matching one of:\n"
         '{"status":"actions","thought":"...","confidence":0.0,"actions":['
         '{"intent":"...","expected_result":"...","action":'
         '{"name":"...","channel":"browser|api|external",'
-        '"arguments":{},"locator":{"strategy":"role","value":"button",'
-        '"name":"Save"},"tool_ref":null,"timeout_seconds":30}}]}\n'
+        '"arguments":{},"element_id":"e17","tool_ref":null,'
+        '"timeout_seconds":30}}]}\n'
         '{"status":"ask","question":"...","memory":"optional durable fact"}\n'
         '{"status":"complete","summary":"...","memory":"optional durable fact"}\n'
         "The optional memory field is a short factual note from the current "
@@ -747,7 +755,11 @@ def _requires_download_processing(request: str) -> bool:
     return any(term in normalized for term in terms)
 
 
-def _parse_plan(raw: dict[str, Any], actions: Sequence[ActionSpec]) -> PlanningResult:
+def _parse_plan(
+    raw: dict[str, Any],
+    actions: Sequence[ActionSpec],
+    elements: Sequence[dict[str, JsonValue]] = (),
+) -> PlanningResult:
     raw_kind = str(raw.get("status", "")).strip().lower()
     try:
         status = PlanningStatus(raw_kind)
@@ -774,7 +786,7 @@ def _parse_plan(raw: dict[str, Any], actions: Sequence[ActionSpec]) -> PlanningR
         if not isinstance(raw_planned, dict):
             raise PlannerProtocolError("Each planned action must be an object")
         raw_action = raw_planned.get("action")
-        action = _parse_action(raw_action, actions)
+        action = _parse_action(raw_action, actions, elements)
         planned.append(
             PlannedAction(
                 action,
@@ -798,6 +810,7 @@ def _parse_plan(raw: dict[str, Any], actions: Sequence[ActionSpec]) -> PlanningR
 def _parse_action(
     raw_action: Any,
     actions: Sequence[ActionSpec],
+    elements: Sequence[dict[str, JsonValue]] = (),
 ) -> Action:
     if not isinstance(raw_action, dict):
         raise PlannerProtocolError("Planned item is missing an action object")
@@ -809,6 +822,8 @@ def _parse_action(
 
     raw_locator = raw_action.get("locator")
     locator = Locator.from_dict(raw_locator) if isinstance(raw_locator, dict) else None
+    element_id = str(raw_action.get("element_id", "")).strip()
+    target = _target_from_element_id(element_id, elements) if element_id else None
     raw_arguments = raw_action.get("arguments", {})
     if not isinstance(raw_arguments, dict):
         raise PlannerProtocolError("Action arguments must be a JSON object")
@@ -817,6 +832,7 @@ def _parse_action(
         channel=matching[0].channel,
         arguments=dict(raw_arguments),
         locator=locator,
+        target=target,
         tool_ref=(str(raw_action["tool_ref"]) if raw_action.get("tool_ref") is not None else None),
         timeout_seconds=(
             float(raw_action["timeout_seconds"])
@@ -831,6 +847,52 @@ def _parse_action(
         raise PlannerProtocolError(str(exc)) from exc
 
     return action
+
+
+def _target_from_element_id(
+    element_id: str,
+    elements: Sequence[dict[str, JsonValue]],
+) -> ElementTarget:
+    element = next(
+        (item for item in elements if str(item.get("element_id", "")) == element_id),
+        None,
+    )
+    if element is None:
+        raise PlannerProtocolError(f"Unknown observation element_id: {element_id}")
+    candidates: list[Locator] = []
+    test_id = str(element.get("test_id", "")).strip()
+    role = str(element.get("role", "")).strip()
+    name = str(element.get("name", "")).strip()
+    label = str(element.get("label", "")).strip()
+    text = str(element.get("text", "")).strip()
+    if test_id:
+        candidates.append(Locator("test_id", test_id))
+    if role and name:
+        candidates.append(Locator("role", role, name=name))
+    if label:
+        candidates.append(Locator("label", label))
+    if text:
+        candidates.append(Locator("text", text))
+    if not candidates:
+        raise PlannerProtocolError(f"Element {element_id} has no replayable locator")
+    raw_frame_path = element.get("frame_path", [])
+    frame_path = tuple(
+        FrameRef.from_dict(item)
+        for item in raw_frame_path
+        if isinstance(item, dict)
+    ) if isinstance(raw_frame_path, list) else ()
+    return ElementTarget(
+        frame_path=frame_path,
+        candidates=tuple(candidates),
+        fingerprint=ElementFingerprint(
+            tag=str(element.get("tag", "")),
+            role=role,
+            accessible_name=name,
+            text=text,
+            attributes={"data-testid": test_id} if test_id else {},
+        ),
+        element_id=element_id,
+    )
 
 
 __all__ = [

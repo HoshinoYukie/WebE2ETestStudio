@@ -168,3 +168,40 @@ def test_playwright_device_uses_observation_to_upgrade_locator() -> None:
             "data-clicked"
         ) == "yes"
         browser.close()
+
+
+@pytest.mark.browser
+def test_playwright_device_clicks_visible_element_inside_iframe() -> None:
+    """A visually present frame target must not be treated as absent from the page."""
+    if os.environ.get("RUN_BROWSER_TESTS") != "1":
+        pytest.skip("set RUN_BROWSER_TESTS=1 after installing Chromium")
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.set_content(
+            "<iframe srcdoc=\"<a href='#proposal' "
+            "onclick=&quot;this.dataset.clicked='yes';return false&quot;>"
+            "Create Proposal</a>\"></iframe>"
+        )
+        device = PlaywrightDevice(page=page)
+        device.observe()
+
+        result = device.execute(
+            Action(
+                "click",
+                ActionChannel.BROWSER,
+                locator=Locator("role", "link", name="Create Proposal"),
+            )
+        )
+
+        assert result.success, result.error
+        assert (
+            page.frames[1]
+            .get_by_role("link", name="Create Proposal")
+            .get_attribute("data-clicked")
+            == "yes"
+        )
+        browser.close()

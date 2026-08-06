@@ -8,7 +8,14 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from web_e2e_test_studio.domain import Action, ActionChannel, Locator
+from web_e2e_test_studio.domain import (
+    Action,
+    ActionChannel,
+    ElementFingerprint,
+    ElementTarget,
+    FrameRef,
+    Locator,
+)
 
 _EVENT_QUEUE = "__WEB_E2E_TEST_STUDIO_EVENTS__"
 _CONSOLE_PREFIX = "__WEB_E2E_TEST_STUDIO_EVENT__"
@@ -47,11 +54,13 @@ class ManualEventCompiler:
             locator = self._locator_for(event)
             if locator is None:
                 continue
+            target = self._target_for(event, locator)
             if event_type == "click":
                 action = Action(
                     name="click",
                     channel=ActionChannel.BROWSER,
                     locator=locator,
+                    target=target,
                 )
             else:
                 raw_target = event.get("target", {})
@@ -71,6 +80,7 @@ class ManualEventCompiler:
                         channel=ActionChannel.BROWSER,
                         arguments={"value": str(event.get("value", ""))},
                         locator=locator,
+                        target=target,
                     )
                 elif event_type == "change" and input_type.lower() in {
                     "checkbox",
@@ -81,6 +91,7 @@ class ManualEventCompiler:
                         channel=ActionChannel.BROWSER,
                         arguments={"checked": bool(event.get("checked", True))},
                         locator=locator,
+                        target=target,
                     )
                 else:
                     text = str(event.get("value", ""))
@@ -95,6 +106,7 @@ class ManualEventCompiler:
                         channel=ActionChannel.BROWSER,
                         arguments={"text": text},
                         locator=locator,
+                        target=target,
                     )
                     if (
                         actions
@@ -105,6 +117,31 @@ class ManualEventCompiler:
                         continue
             actions.append(action)
         return actions
+
+    @staticmethod
+    def _target_for(event: Mapping[str, Any], locator: Locator) -> ElementTarget:
+        raw_frame_path = event.get("frame_path", [])
+        frame_path = tuple(
+            FrameRef.from_dict(dict(item))
+            for item in raw_frame_path
+            if isinstance(item, Mapping)
+        ) if isinstance(raw_frame_path, list) else ()
+        raw_target = event.get("target", {})
+        target_data = raw_target if isinstance(raw_target, Mapping) else {}
+        attributes: dict[str, str] = {}
+        if target_data.get("test_id"):
+            attributes["data-testid"] = str(target_data["test_id"])
+        return ElementTarget(
+            frame_path=frame_path,
+            candidates=(locator,),
+            fingerprint=ElementFingerprint(
+                tag=str(target_data.get("tag", "")),
+                role=str(target_data.get("role", "")),
+                accessible_name=str(target_data.get("name", "")),
+                text=str(target_data.get("text", "")),
+                attributes=attributes,
+            ),
+        )
 
     @staticmethod
     def _locator_for(event: Mapping[str, Any]) -> Locator | None:
@@ -287,8 +324,36 @@ class BrowserEventRecorder:
       input_type: (element.getAttribute('type') || '').toLowerCase()
     }};
   }};
+  const framePath = () => {{
+    const path = [];
+    let current = window;
+    while (current !== current.top) {{
+      let frameElement = null;
+      try {{ frameElement = current.frameElement; }} catch (_error) {{}}
+      if (!frameElement) {{
+        path.unshift({{
+          name: current.name || '',
+          url_hint: current.location.href,
+          index: 0
+        }});
+        break;
+      }}
+      const selector = cssPath(frameElement);
+      const siblings = selector
+        ? Array.from(frameElement.ownerDocument.querySelectorAll(selector))
+        : Array.from(frameElement.ownerDocument.querySelectorAll('iframe,frame'));
+      path.unshift({{
+        selector,
+        name: frameElement.getAttribute('name') || '',
+        url_hint: frameElement.getAttribute('src') || '',
+        index: Math.max(0, siblings.indexOf(frameElement))
+      }});
+      try {{ current = current.parent; }} catch (_error) {{ break; }}
+    }}
+    return path;
+  }};
   const emit = (event) => {{
-    const recorded = {{ ...event, timestamp: Date.now() }};
+    const recorded = {{ ...event, frame_path: framePath(), timestamp: Date.now() }};
     window[queueName].push(recorded);
     console.debug('{_CONSOLE_PREFIX}' + JSON.stringify(recorded));
   }};

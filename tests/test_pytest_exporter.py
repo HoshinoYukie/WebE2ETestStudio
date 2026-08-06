@@ -4,6 +4,8 @@ from pathlib import Path
 from web_e2e_test_studio.domain import (
     Action,
     ActionChannel,
+    ElementTarget,
+    FrameRef,
     JsonValue,
     Locator,
     RecordedStep,
@@ -21,6 +23,7 @@ def _recorded_step(
     *,
     arguments: dict[str, JsonValue] | None = None,
     locator: Locator | None = None,
+    target: ElementTarget | None = None,
     channel: ActionChannel = ActionChannel.BROWSER,
     tool_ref: str | None = None,
 ) -> RecordedStep:
@@ -31,6 +34,7 @@ def _recorded_step(
             channel=channel,
             arguments=arguments or {},
             locator=locator,
+            target=target,
             tool_ref=tool_ref,
         ),
         intent=f"Perform {name}",
@@ -40,6 +44,39 @@ def _recorded_step(
             status=VerificationStatus.VERIFIED,
             reason="Observed after recording",
         ),
+    )
+
+
+def test_exporter_preserves_nested_frame_path_in_plain_pytest() -> None:
+    asset = RecordedTestAsset(
+        id="asset_frames",
+        name="Frame flow",
+        goal="Create a proposal in an embedded app",
+        steps=[
+            _recorded_step(
+                "s1",
+                "click",
+                target=ElementTarget(
+                    frame_path=(
+                        FrameRef(selector="#shell-frame"),
+                        FrameRef(selector="iframe[name='content']"),
+                    ),
+                    candidates=(
+                        Locator("role", "link", name="Create Proposal"),
+                    ),
+                ),
+            )
+        ],
+    )
+
+    generated = PytestExporter().render(asset)
+
+    ast.parse(generated)
+    assert (
+        "page.frame_locator('#shell-frame')"
+        ".frame_locator(\"iframe[name='content']\")"
+        ".get_by_role('link', name='Create Proposal', exact=True).click()"
+        in generated
     )
 
 

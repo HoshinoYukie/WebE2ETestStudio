@@ -124,4 +124,10 @@ def _resolved_action(action: Action, result: ActionResult) -> Action:
     if selected == action.locator:
         return action
     selected = replace(selected, fallbacks=(action.locator,))
+    if action.target is not None:
+        return replace(
+            action,
+            locator=selected,
+            target=replace(action.target, candidates=(selected,)),
+        )
     return replace(action, locator=selected)
