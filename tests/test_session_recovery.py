@@ -149,6 +149,58 @@ def test_desktop_engine_resumes_verified_asset_and_last_page(
     assert len(restored.steps) == 1
 
 
+def test_checkpoint_for_external_output_is_kept_inside_workspace(tmp_path: Path) -> None:
+    external = tmp_path.parent / f"{tmp_path.name}-external"
+    checkpoint = RunCheckpoint.create(
+        name="external-flow",
+        goal="Export outside workspace",
+        asset_path=external / "external-flow.json",
+        output_path=external / "test_external_flow.py",
+        workspace=tmp_path,
+        initial_url="",
+        headless=False,
+    )
+
+    path = RunCheckpointStore(tmp_path).save(checkpoint)
+
+    assert path.parent == tmp_path / ".web-e2e" / "runs"
+    assert path.name == f"{checkpoint.id}.run.json"
+    assert RunCheckpointStore(tmp_path).load(path) == checkpoint
+
+
+def test_desktop_engine_starts_and_resumes_with_external_output(tmp_path: Path) -> None:
+    external = tmp_path.parent / f"{tmp_path.name}-exports"
+    config = DesktopRecordingConfig(
+        url="",
+        goal="External export",
+        name="external_flow",
+        asset_path=external / "external_flow.json",
+        output_path=external / "test_external_flow.py",
+        workspace=tmp_path,
+    )
+    first = DesktopRecordingEngine(config, device=FakeDevice(), recorder=FakeRecorder())
+
+    assert first.start().running is True
+    first.stop()
+    checkpoint = RunCheckpointStore(tmp_path).discover()[0]
+    resumed_config = DesktopRecordingConfig(
+        url=config.url,
+        goal=config.goal,
+        name=config.name,
+        asset_path=config.asset_path,
+        output_path=config.output_path,
+        workspace=config.workspace,
+        checkpoint_path=checkpoint.checkpoint_path,
+    )
+
+    resumed = DesktopRecordingEngine(
+        resumed_config,
+        device=FakeDevice(),
+        recorder=FakeRecorder(),
+    ).resume()
+    assert resumed.running is True
+
+
 def test_checkpoint_does_not_persist_secret_event_values(
     tmp_path: Path,
 ) -> None:

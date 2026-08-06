@@ -69,6 +69,42 @@ def test_registered_spreadsheet_action_extracts_matching_cells(
     ]
 
 
+def test_spreadsheet_variable_extraction_requires_one_value(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "Devices.xlsx"
+    _write_workbook(
+        workbook,
+        (
+            ("Device", "Bulk installation link"),
+            ("MFC-L9570CDW", "https://install.example/device/289886"),
+        ),
+    )
+    registry = default_capability_catalog().build_action_registry(
+        CapabilityContext(
+            device=_NoBrowser(),
+            tools=ExternalToolRegistry(tmp_path, tmp_path / ".tools"),
+        )
+    )
+
+    result = registry.execute(
+        Action(
+            "extract_spreadsheet",
+            ActionChannel.EXTERNAL,
+            {
+                "file_path": str(workbook),
+                "query": "Bulk installation link",
+                "sheet": "Devices",
+                "cell": "B2",
+                "variable_name": "bulk_link",
+            },
+        )
+    )
+
+    assert result.status is ActionStatus.SUCCESS
+    assert result.output["value"] == "https://install.example/device/289886"
+
+
 def test_spreadsheet_plan_requires_file_path_and_query(tmp_path: Path) -> None:
     tools = ExternalToolRegistry(tmp_path, tmp_path / ".tools")
     registry = default_capability_catalog().build_action_registry(
@@ -82,14 +118,14 @@ def test_spreadsheet_plan_requires_file_path_and_query(tmp_path: Path) -> None:
         PlanCompiler(registry).compile(
             PlanningResult.actions(
                 (
-                PlannedAction(
-                    Action(
-                        name="extract_spreadsheet",
-                        channel=ActionChannel.EXTERNAL,
+                    PlannedAction(
+                        Action(
+                            name="extract_spreadsheet",
+                            channel=ActionChannel.EXTERNAL,
+                        ),
+                        intent="Read the downloaded workbook",
+                        expected_result="Return the installation link",
                     ),
-                    intent="Read the downloaded workbook",
-                    expected_result="Return the installation link",
-                ),
                 )
             )
         )
@@ -119,9 +155,7 @@ def test_external_tool_empty_output_is_not_verified() -> None:
             channel=ActionChannel.EXTERNAL,
             tool_ref="echo_tool",
         ),
-        ActionResult.succeeded(
-            {"stdout": "", "stderr": "", "returncode": 0}
-        ),
+        ActionResult.succeeded({"stdout": "", "stderr": "", "returncode": 0}),
         Observation(),
         Observation(),
         "Return extracted workbook content",
@@ -162,8 +196,7 @@ def _write_workbook(
     rows: tuple[tuple[str, ...], ...],
 ) -> None:
     cells = "".join(
-        f'<c r="{chr(65 + column)}{row}" t="inlineStr">'
-        f"<is><t>{value}</t></is></c>"
+        f'<c r="{chr(65 + column)}{row}" t="inlineStr"><is><t>{value}</t></is></c>'
         for row, values in enumerate(rows, start=1)
         for column, value in enumerate(values)
     )

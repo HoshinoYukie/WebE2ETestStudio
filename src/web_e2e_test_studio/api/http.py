@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 from web_e2e_test_studio.agent import ActionSpec
 from web_e2e_test_studio.agent.control import ActionExecutionContext
+from web_e2e_test_studio.api.response_assertions import assert_json_response
 from web_e2e_test_studio.domain import (
     Action,
     ActionChannel,
@@ -26,7 +27,7 @@ def http_action_spec() -> ActionSpec:
         channel=ActionChannel.API,
         description=(
             "Send an HTTP request and verify its status. Supports method, url, "
-            "headers, json or body, expected_status, and timeout."
+            "headers, json or body, expected_status, timeout, and JSON response assertions."
         ),
         required_arguments=("method", "url"),
         argument_schema={
@@ -37,6 +38,7 @@ def http_action_spec() -> ActionSpec:
             "body": "string",
             "expected_status": "integer",
             "timeout": "number",
+            "response_assertions": "array",
         },
     )
 
@@ -107,12 +109,21 @@ class HttpActionExecutor:
                     },
                     "body": raw.decode("utf-8", errors="replace"),
                 }
+                json_payload: JsonValue | None = None
                 with suppress(json.JSONDecodeError, UnicodeDecodeError):
-                    output["json"] = cast(JsonValue, json.loads(raw))
+                    json_payload = cast(JsonValue, json.loads(raw))
+                    output["json"] = json_payload
                 if status != expected:
                     return ActionResult.failed(
                         f"Expected HTTP {expected}, received {status}"
                     )
+                assertions = action.arguments.get("response_assertions")
+                if assertions:
+                    if "json" not in output:
+                        return ActionResult.failed(
+                            "HTTP response assertions require a valid JSON response"
+                        )
+                    assert_json_response(json_payload, assertions)
                 return ActionResult.succeeded(output)
         except Exception as exc:
             if control is not None and control.cancelled:

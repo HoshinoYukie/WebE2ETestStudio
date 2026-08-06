@@ -65,9 +65,7 @@ class StructuredVLMPlanner:
         actions: Sequence[ActionSpec],
     ) -> PlanningResult:
         system_prompt = _system_prompt(actions)
-        user_prompt = _user_prompt(
-            request, observation, history, self._memories
-        )
+        user_prompt = _user_prompt(request, observation, history, self._memories)
         plan = self._request_valid_plan(
             system_prompt,
             user_prompt,
@@ -201,9 +199,7 @@ class OpenAICompatibleVLMBackend:
             "base_url": base_url,
         }
         if ignore_proxy:
-            client_arguments["http_client"] = DefaultHttpxClient(
-                trust_env=False
-            )
+            client_arguments["http_client"] = DefaultHttpxClient(trust_env=False)
         if timeout is not None:
             client_arguments["timeout"] = timeout
         self._client = OpenAI(**client_arguments)
@@ -217,11 +213,7 @@ class OpenAICompatibleVLMBackend:
         *,
         timeout: float | None = None,
     ) -> OpenAICompatibleVLMBackend:
-        api_key = (
-            os.getenv("VLM_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-            or ""
-        )
+        api_key = os.getenv("VLM_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
         model = os.getenv("VLM_MODEL", "gpt-4o")
         base_url = os.getenv("VLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
         ignore_proxy = _environment_flag("VLM_IGNORE_PROXY")
@@ -239,9 +231,7 @@ class OpenAICompatibleVLMBackend:
         user_prompt: str,
         screenshot_path: str,
     ) -> dict[str, Any]:
-        content: list[dict[str, Any]] = [
-            {"type": "text", "text": user_prompt}
-        ]
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
         if screenshot_path:
             screenshot = Path(screenshot_path)
             if screenshot.is_file():
@@ -268,13 +258,41 @@ class OpenAICompatibleVLMBackend:
             max_tokens=self._max_tokens,
         )
         text = response.choices[0].message.content or ""
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise PlannerProtocolError("VLM did not return valid JSON") from exc
+        parsed = _parse_json_object_response(text)
         if not isinstance(parsed, dict):
             raise PlannerProtocolError("VLM response must be a JSON object")
         return parsed
+
+
+def _parse_json_object_response(text: str) -> dict[str, Any]:
+    """Accept a JSON object with optional local-model prose or code fences."""
+    candidate = text.strip()
+    if candidate.startswith("```") and candidate.endswith("```"):
+        first_newline = candidate.find("\n")
+        if first_newline >= 0:
+            candidate = candidate[first_newline + 1 : -3].strip()
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        parsed = None
+        for index, character in enumerate(candidate):
+            if character != "{":
+                continue
+            try:
+                value, end = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            prefix = candidate[:index].strip()
+            suffix = candidate[index + end :].strip()
+            if isinstance(value, dict) and "{" not in prefix + suffix:
+                parsed = value
+                break
+        if parsed is None:
+            raise PlannerProtocolError("VLM did not return valid JSON") from None
+    if not isinstance(parsed, dict):
+        raise PlannerProtocolError("VLM response must be a JSON object")
+    return parsed
 
 
 def _system_prompt(actions: Sequence[ActionSpec]) -> str:
@@ -308,8 +326,7 @@ def _system_prompt(actions: Sequence[ActionSpec]) -> str:
         "analyze the downloaded content. When it does, downloading is only an "
         "intermediate step: continue with a suitable registered external tool "
         "and complete only after the requested information is returned.\n"
-        "Registered action schemas:\n"
-        + json.dumps(schemas, ensure_ascii=False, indent=2)
+        "Registered action schemas:\n" + json.dumps(schemas, ensure_ascii=False, indent=2)
     )
 
 
@@ -348,9 +365,7 @@ def _user_prompt(
     ]
     observation_payload = observation.to_dict()
     observation_payload["page_text"] = observation.page_text[:8000]
-    observation_payload["interactive_elements"] = list(
-        observation.interactive_elements[:100]
-    )
+    observation_payload["interactive_elements"] = list(observation.interactive_elements[:100])
     return json.dumps(
         {
             "request": request,
@@ -368,23 +383,17 @@ def _apply_completion_policy(
     request: str,
     history: Sequence[AgentFeedback],
 ) -> PlanningResult:
-    if (
-        plan.status is not PlanningStatus.ASK
-        or not _is_download_only_goal(request)
-    ):
+    if plan.status is not PlanningStatus.ASK or not _is_download_only_goal(request):
         return plan
     for feedback in reversed(history):
         for record in reversed(feedback.execution.records):
             if (
                 record.task.action.name == "download"
                 and record.result.status is ActionStatus.SUCCESS
-                and record.verification.status
-                is VerificationStatus.VERIFIED
+                and record.verification.status is VerificationStatus.VERIFIED
             ):
                 path = str(record.result.output.get("path", "")).strip()
-                filename = str(
-                    record.result.output.get("filename", "")
-                ).strip()
+                filename = str(record.result.output.get("filename", "")).strip()
                 artifact = path or filename
                 summary = (
                     f"Download completed: {artifact}"
@@ -422,9 +431,7 @@ def _apply_remembered_link_policy(
         any(term in folded_request for term in _OPEN_LINK_TERMS)
         and any(term in folded_request for term in _LINK_TERMS)
         and any(
-            spec.name == "navigate"
-            and spec.channel is ActionChannel.BROWSER
-            for spec in actions
+            spec.name == "navigate" and spec.channel is ActionChannel.BROWSER for spec in actions
         )
     ):
         return plan
@@ -438,24 +445,16 @@ def _apply_remembered_link_policy(
     for memory in memories:
         memory_tokens = set(re.findall(r"[a-z0-9_-]{3,}", memory.casefold()))
         score = len(request_tokens & memory_tokens)
-        candidates.extend(
-            (url.rstrip(".,:;"), score)
-            for url in _URL_PATTERN.findall(memory)
-        )
+        candidates.extend((url.rstrip(".,:;"), score) for url in _URL_PATTERN.findall(memory))
     if not candidates:
         return plan
 
     best_score = max(score for _url, score in candidates)
-    best_urls = list(
-        dict.fromkeys(
-            url for url, score in candidates if score == best_score
-        )
-    )
+    best_urls = list(dict.fromkeys(url for url, score in candidates if score == best_score))
     if len(best_urls) != 1:
         return PlanningResult.ask(
             "I found multiple matching links in working memory. "
-            "Please specify which one to open:\n"
-            + "\n".join(f"- {url}" for url in best_urls)
+            "Please specify which one to open:\n" + "\n".join(f"- {url}" for url in best_urls)
         )
 
     url = best_urls[0]
@@ -489,9 +488,7 @@ def _apply_managed_download_policy(
         plan.status is not PlanningStatus.ACTIONS
         or not _request_mentions_download(request)
         or not any(
-            spec.name == "download"
-            and spec.channel is ActionChannel.BROWSER
-            for spec in actions
+            spec.name == "download" and spec.channel is ActionChannel.BROWSER for spec in actions
         )
     ):
         return plan
@@ -500,18 +497,16 @@ def _apply_managed_download_policy(
     for item in plan.planned_actions:
         action = item.action
         locator = action.locator
-        locator_text = (
-            " ".join(
-                value
-                for value in (
-                    locator.value if locator else "",
-                    locator.name if locator and locator.name else "",
-                    item.intent,
-                    item.expected_result,
-                )
-                if value
-            ).casefold()
-        )
+        locator_text = " ".join(
+            value
+            for value in (
+                locator.value if locator else "",
+                locator.name if locator and locator.name else "",
+                item.intent,
+                item.expected_result,
+            )
+            if value
+        ).casefold()
         if (
             action.channel is ActionChannel.BROWSER
             and action.name == "click"
@@ -527,9 +522,7 @@ def _apply_managed_download_policy(
         ):
             action = replace(action, name="download")
             changed = True
-        upgraded.append(
-            PlannedAction(action, item.intent, item.expected_result)
-        )
+        upgraded.append(PlannedAction(action, item.intent, item.expected_result))
     if not changed:
         return plan
     return PlanningResult.actions(
@@ -541,15 +534,9 @@ def _apply_managed_download_policy(
 
 def _request_mentions_download(request: str) -> bool:
     normalized = request.casefold()
-    if any(
-        term in normalized
-        for term in ("\u4e0b\u8f7d", "\u5bfc\u51fa")
-    ):
+    if any(term in normalized for term in ("\u4e0b\u8f7d", "\u5bfc\u51fa")):
         return True
-    return any(
-        term in normalized
-        for term in ("download", "export", "下载", "导出")
-    )
+    return any(term in normalized for term in ("download", "export", "下载", "导出"))
 
 
 def _latest_verified_download_path(
@@ -560,8 +547,7 @@ def _latest_verified_download_path(
             if (
                 record.task.action.name == "download"
                 and record.result.status is ActionStatus.SUCCESS
-                and record.verification.status
-                is VerificationStatus.VERIFIED
+                and record.verification.status is VerificationStatus.VERIFIED
             ):
                 path = record.result.output.get("path")
                 if isinstance(path, str) and path.strip():
@@ -580,8 +566,7 @@ def _apply_spreadsheet_extraction_policy(
         or not known_download.lower().endswith((".xlsx", ".xlsm"))
         or not _requires_download_processing(request)
         or not any(
-            spec.name == "extract_spreadsheet"
-            and spec.channel is ActionChannel.EXTERNAL
+            spec.name == "extract_spreadsheet" and spec.channel is ActionChannel.EXTERNAL
             for spec in actions
         )
     ):
@@ -607,9 +592,7 @@ def _apply_spreadsheet_extraction_policy(
                 timeout_seconds=action.timeout_seconds,
             )
             changed = True
-        upgraded.append(
-            PlannedAction(action, item.intent, item.expected_result)
-        )
+        upgraded.append(PlannedAction(action, item.intent, item.expected_result))
     if not changed:
         return plan
     return PlanningResult.actions(
@@ -678,10 +661,7 @@ def _is_premature_file_completion(
     request: str,
     history: Sequence[AgentFeedback],
 ) -> bool:
-    if (
-        plan.status is not PlanningStatus.COMPLETE
-        or not _requires_download_processing(request)
-    ):
+    if plan.status is not PlanningStatus.COMPLETE or not _requires_download_processing(request):
         return False
     downloaded = False
     processed = False
@@ -689,17 +669,12 @@ def _is_premature_file_completion(
         for record in feedback.execution.records:
             succeeded = (
                 record.result.status is ActionStatus.SUCCESS
-                and record.verification.status
-                is VerificationStatus.VERIFIED
+                and record.verification.status is VerificationStatus.VERIFIED
             )
             if record.task.action.name == "download" and succeeded:
                 downloaded = True
                 processed = False
-            elif (
-                downloaded
-                and record.task.action.channel is ActionChannel.EXTERNAL
-                and succeeded
-            ):
+            elif downloaded and record.task.action.channel is ActionChannel.EXTERNAL and succeeded:
                 processed = True
     return downloaded and not processed
 
@@ -772,9 +747,7 @@ def _requires_download_processing(request: str) -> bool:
     return any(term in normalized for term in terms)
 
 
-def _parse_plan(
-    raw: dict[str, Any], actions: Sequence[ActionSpec]
-) -> PlanningResult:
+def _parse_plan(raw: dict[str, Any], actions: Sequence[ActionSpec]) -> PlanningResult:
     raw_kind = str(raw.get("status", "")).strip().lower()
     try:
         status = PlanningStatus(raw_kind)
@@ -785,9 +758,7 @@ def _parse_plan(
         question = str(raw.get("question", "")).strip()
         if not question:
             raise PlannerProtocolError("Ask plan is missing a question")
-        return PlanningResult.ask(
-            question, memory=str(raw.get("memory", "")).strip()
-        )
+        return PlanningResult.ask(question, memory=str(raw.get("memory", "")).strip())
 
     if status is PlanningStatus.COMPLETE:
         return PlanningResult.complete(
@@ -818,8 +789,7 @@ def _parse_plan(
         memory=str(raw.get("memory", "")).strip(),
         confidence=(
             float(confidence)
-            if isinstance(confidence, (int, float))
-            and not isinstance(confidence, bool)
+            if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
             else 0.0
         ),
     )
@@ -833,22 +803,12 @@ def _parse_action(
         raise PlannerProtocolError("Planned item is missing an action object")
     name = str(raw_action.get("name", ""))
     channel = str(raw_action.get("channel", ""))
-    matching = [
-        spec
-        for spec in actions
-        if spec.name == name and spec.channel.value == channel
-    ]
+    matching = [spec for spec in actions if spec.name == name and spec.channel.value == channel]
     if not matching:
-        raise PlannerProtocolError(
-            f"Model action {name!r} on {channel!r} is not registered"
-        )
+        raise PlannerProtocolError(f"Model action {name!r} on {channel!r} is not registered")
 
     raw_locator = raw_action.get("locator")
-    locator = (
-        Locator.from_dict(raw_locator)
-        if isinstance(raw_locator, dict)
-        else None
-    )
+    locator = Locator.from_dict(raw_locator) if isinstance(raw_locator, dict) else None
     raw_arguments = raw_action.get("arguments", {})
     if not isinstance(raw_arguments, dict):
         raise PlannerProtocolError("Action arguments must be a JSON object")
@@ -857,11 +817,7 @@ def _parse_action(
         channel=matching[0].channel,
         arguments=dict(raw_arguments),
         locator=locator,
-        tool_ref=(
-            str(raw_action["tool_ref"])
-            if raw_action.get("tool_ref") is not None
-            else None
-        ),
+        tool_ref=(str(raw_action["tool_ref"]) if raw_action.get("tool_ref") is not None else None),
         timeout_seconds=(
             float(raw_action["timeout_seconds"])
             if isinstance(raw_action.get("timeout_seconds"), (int, float))
@@ -875,6 +831,8 @@ def _parse_action(
         raise PlannerProtocolError(str(exc)) from exc
 
     return action
+
+
 __all__ = [
     "OpenAICompatibleVLMBackend",
     "PlannerProtocolError",

@@ -40,6 +40,19 @@ class FakeEngine:
         self.running = True
         return self._snapshot()
 
+    def run_recorded_step(self, step_id: str):  # noqa: ANN201
+        self.calls.append(f"run_recorded_step:{step_id}")
+        return (
+            {
+                "step_id": step_id,
+                "action": "click",
+                "channel": "browser",
+                "status": "succeeded",
+                "verification": {"status": "verified", "reason": "Click succeeded"},
+            },
+            self._snapshot(),
+        )
+
     def sync_manual(self) -> DesktopRecordingSnapshot:
         self.calls.append("sync_manual")
         return self._snapshot()
@@ -70,9 +83,7 @@ class FakeEngine:
     def validate_export(self, event_sink=None):  # noqa: ANN001, ANN201
         self.calls.append("validate_export")
         if event_sink is not None:
-            event_sink(
-                StepValidationEvent("step_1", "navigate", "passed")
-            )
+            event_sink(StepValidationEvent("step_1", "navigate", "passed"))
         return (
             ModelFreeValidationResult(
                 passed=True,
@@ -87,10 +98,21 @@ class FakeEngine:
     def define_variable(self, name: str, description: str):  # noqa: ANN201
         self.calls.append(f"define_variable:{name}")
         return (
-            VariableDefinition(
-                name, description, "digits", {"length": 8, "prefix": ""}
-            ),
+            VariableDefinition(name, description, "digits", {"length": 8, "prefix": ""}),
             "12345678",
+            self._snapshot(),
+        )
+
+    def extract_variable(self, name: str, description: str, source: str, file_path: str = ""):  # noqa: ANN201
+        self.calls.append(f"extract_variable:{name}:{source}")
+        return (
+            VariableDefinition(
+                name,
+                description,
+                f"{source}_value",
+                {"source": source, "captured_value": "ORD-42"},
+            ),
+            "ORD-42",
             self._snapshot(),
         )
 
@@ -184,6 +206,30 @@ def test_controller_defines_and_previews_generated_variable(
         controller.close()
 
 
+def test_controller_extracts_and_previews_page_variable(tmp_path: Path) -> None:
+    config = DesktopRecordingConfig(
+        url="",
+        goal="Variables",
+        name="variables",
+        asset_path=tmp_path / "asset.json",
+        output_path=tmp_path / "test_variables.py",
+        workspace=tmp_path,
+    )
+    controller = DesktopStudioController(engine_factory=FakeEngine)
+    try:
+        controller.start(config)
+        _wait_for_event(controller, "snapshot")
+        controller.extract_variable("order_id", "Read order ID", "page")
+
+        event = _wait_for_event(controller, "variable_extracted")
+
+        assert event.payload["reference"] == "${VAR:order_id}"
+        assert event.payload["value"] == "ORD-42"
+        assert event.payload["source"] == "page"
+    finally:
+        controller.close()
+
+
 def test_controller_resumes_a_recoverable_session(tmp_path: Path) -> None:
     engines: list[FakeEngine] = []
 
@@ -207,6 +253,34 @@ def test_controller_resumes_a_recoverable_session(tmp_path: Path) -> None:
 
         assert event.message == "Recording resumed"
         assert engines[0].calls == ["resume"]
+    finally:
+        controller.close()
+
+
+def test_controller_atomically_resumes_and_runs_a_recorded_step(tmp_path: Path) -> None:
+    engines: list[FakeEngine] = []
+
+    def factory(config: DesktopRecordingConfig) -> FakeEngine:
+        engine = FakeEngine(config)
+        engines.append(engine)
+        return engine
+
+    config = DesktopRecordingConfig(
+        url="https://example.test",
+        goal="Resume",
+        name="resume",
+        asset_path=tmp_path / "resume.json",
+        output_path=tmp_path / "test_resume.py",
+        workspace=tmp_path,
+    )
+    controller = DesktopStudioController(engine_factory=factory)
+    try:
+        controller.resume_and_run_step(config, "step_2")
+        event = _wait_for_event(controller, "historical_step_executed")
+
+        assert engines[0].calls == ["resume", "run_recorded_step:step_2"]
+        assert event.payload["step_id"] == "step_2"
+        assert event.payload["status"] == "succeeded"
     finally:
         controller.close()
 
@@ -309,9 +383,7 @@ def test_controller_coalesces_unconsumed_preview_frames(
 
         events = controller.poll_events()
 
-        assert sum(
-            event.kind == "browser_preview" for event in events
-        ) <= 1
+        assert sum(event.kind == "browser_preview" for event in events) <= 1
     finally:
         controller.close()
 
@@ -350,9 +422,7 @@ def test_controller_interrupts_active_action_without_waiting_for_worker(
         controller.close()
 
 
-def _wait_for_event(
-    controller: DesktopStudioController, kind: str
-):  # noqa: ANN201
+def _wait_for_event(controller: DesktopStudioController, kind: str):  # noqa: ANN201
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         for event in controller.poll_events():
@@ -366,8 +436,7 @@ def test_studio_error_hides_provider_html_permission_page() -> None:
     PermissionDeniedError = type("PermissionDeniedError", (Exception,), {})
     message = format_studio_error(
         PermissionDeniedError(
-            "<!-- IE friendly error message workaround. -->"
-            "<html><body>Access denied</body></html>"
+            "<!-- IE friendly error message workaround. --><html><body>Access denied</body></html>"
         )
     )
 

@@ -356,9 +356,7 @@ def test_playwright_device_owns_browser_lifecycle() -> None:
     assert started is device
     assert device.page is None
     assert playwright.chromium.launch_options == {"headless": False}
-    assert browser.context_options == {
-        "viewport": {"width": 1024, "height": 768}
-    }
+    assert browser.context_options == {"viewport": {"width": 1024, "height": 768}}
     assert context.closed is True
     assert browser.closed is True
     assert playwright.stopped is True
@@ -374,9 +372,7 @@ class FakeObservationPage:
         assert "interactive_elements" in script
         return {
             "viewport": {"width": 1280, "height": 720},
-            "interactive_elements": [
-                {"tag": "button", "text": "Create report"}
-            ],
+            "interactive_elements": [{"tag": "button", "text": "Create report"}],
             "page_text": "Reports Create report",
         }
 
@@ -389,9 +385,7 @@ def test_playwright_device_observes_serializable_page_state() -> None:
     assert observation.url == "https://example.test/dashboard"
     assert observation.title == "Dashboard"
     assert observation.viewport == {"width": 1280, "height": 720}
-    assert observation.interactive_elements == (
-        {"tag": "button", "text": "Create report"},
-    )
+    assert observation.interactive_elements == ({"tag": "button", "text": "Create report"},)
     assert observation.page_text == "Reports Create report"
 
 
@@ -462,9 +456,7 @@ class FakeActionLocator:
 
     def nth(self, index: int) -> "FakeActionLocator":
         self.calls.append(("nth", self.identity, index))
-        return FakeActionLocator(
-            f"{self.identity}.nth({index})", self.calls, count=1
-        )
+        return FakeActionLocator(f"{self.identity}.nth({index})", self.calls, count=1)
 
     def click(self) -> None:
         self.calls.append(("click", self.identity))
@@ -641,6 +633,23 @@ def test_playwright_device_executes_supported_deterministic_actions() -> None:
     ]
 
 
+def test_playwright_device_extracts_one_located_page_value() -> None:
+    page = FakeExecutionPage()
+    device = PlaywrightDevice(page=page)
+
+    result = device.execute(
+        Action(
+            "extract_value",
+            ActionChannel.BROWSER,
+            {"variable_name": "status", "read": "text"},
+            Locator("css", "#status"),
+        )
+    )
+
+    assert result.output["variable_name"] == "status"
+    assert result.output["value"] == "Ready to ship"
+
+
 def test_playwright_device_tracks_and_switches_multiple_pages() -> None:
     class _TrackedContext:
         def __init__(self) -> None:
@@ -732,20 +741,14 @@ def test_playwright_device_publishes_immutable_lightweight_preview_files(
     first = device.preview()
     second = device.preview()
 
-    assert first.screenshot_path == str(
-        tmp_path / "live-preview-00000001.jpg"
-    )
-    assert second.screenshot_path == str(
-        tmp_path / "live-preview-00000002.jpg"
-    )
+    assert first.screenshot_path == str(tmp_path / "live-preview-00000001.jpg")
+    assert second.screenshot_path == str(tmp_path / "live-preview-00000002.jpg")
     assert second.screenshot_path != first.screenshot_path
     assert Path(second.screenshot_path).read_bytes() == b"jpeg-frame"
     assert second.url == "https://example.test/live"
 
 
-def test_playwright_preview_does_not_replace_a_locked_frame(
-    tmp_path: Path, monkeypatch
-) -> None:  # noqa: ANN001
+def test_playwright_preview_does_not_replace_a_locked_frame(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     class _PreviewPage:
         context = None
         url = "https://example.test/live"
@@ -838,9 +841,7 @@ def test_playwright_device_publishes_cdp_screencast_frames(
 def test_playwright_wait_without_arguments_uses_shared_default() -> None:
     page = FakeExecutionPage()
 
-    result = PlaywrightDevice(page=page).execute(
-        Action("wait", ActionChannel.BROWSER)
-    )
+    result = PlaywrightDevice(page=page).execute(Action("wait", ActionChannel.BROWSER))
 
     assert result.status is ActionStatus.SUCCESS
     assert ("wait", 1000.0) in page.performed
@@ -871,12 +872,8 @@ def test_playwright_device_maps_execution_errors_to_action_results() -> None:
         ActionChannel.BROWSER,
         locator=Locator("css", "#save"),
     )
-    timed_out = PlaywrightDevice(page=FailingPage(TimeoutError("slow"))).execute(
-        action
-    )
-    failed = PlaywrightDevice(page=FailingPage(RuntimeError("detached"))).execute(
-        action
-    )
+    timed_out = PlaywrightDevice(page=FailingPage(TimeoutError("slow"))).execute(action)
+    failed = PlaywrightDevice(page=FailingPage(RuntimeError("detached"))).execute(action)
     blocked = PlaywrightDevice(page=object()).execute(
         Action("click", ActionChannel.EXTERNAL, locator=action.locator)
     )
@@ -907,6 +904,7 @@ def test_playwright_device_exposes_specs_for_every_supported_action() -> None:
         "wait",
         "assert_text",
         "assert_visible",
+        "extract_value",
         "screenshot",
         "bind_page",
         "switch_page",

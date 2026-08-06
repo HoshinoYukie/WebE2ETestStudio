@@ -99,6 +99,59 @@
   line-height: 1.4;
 }
 
+.response-assertions {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.response-assertions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.response-assertions-head strong,
+.response-assertions-head small {
+  display: block;
+}
+
+.response-assertions-head small {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.http-assertion {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) minmax(90px, 1fr) 36px;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.http-assertion .assertion-path,
+.http-assertion .assertion-expected {
+  grid-column: 1 / -1;
+}
+
+.http-assertion .assertion-remove {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.http-assertion .assertion-remove {
+  padding: 0;
+  font-size: 18px;
+}
+
+.http-assertion :disabled {
+  opacity: .48;
+}
+
 .api-request-options select,
 .api-request-options input {
   margin-top: 6px;

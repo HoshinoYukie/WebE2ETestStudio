@@ -15,6 +15,7 @@ class LocatorProbe:
     count: int
     visible: bool
     enabled: bool = True
+    actionable: bool = True
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class LocatorCandidate:
     count: int
     visible: bool
     enabled: bool
+    actionable: bool
     viable: bool
     reason: str
 
@@ -38,6 +40,7 @@ class LocatorCandidate:
             "count": self.count,
             "visible": self.visible,
             "enabled": self.enabled,
+            "actionable": self.actionable,
             "viable": self.viable,
             "reason": self.reason,
         }
@@ -96,6 +99,7 @@ class LocatorEngine:
                     count=facts.count,
                     visible=facts.visible,
                     enabled=facts.enabled,
+                    actionable=facts.actionable,
                     viable=viable,
                     reason=reason,
                 )
@@ -244,6 +248,8 @@ def _viability(
         return False, "element is not visible"
     if not facts.enabled:
         return False, "element is disabled"
+    if not facts.actionable:
+        return False, "element does not receive pointer actions"
     return True, "unique visible enabled match"
 
 
@@ -269,6 +275,7 @@ def _score(
         + (20 if facts.count == 1 else 0)
         + (10 if facts.visible else 0)
         + (5 if facts.enabled else 0)
+        + (10 if facts.actionable else 0)
         + (0 if viable else -200)
     )
 

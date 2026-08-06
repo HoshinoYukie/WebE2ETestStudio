@@ -81,15 +81,15 @@ class ModelFreeValidator:
         ]
         started = time.monotonic()
         process = subprocess.Popen(
-                command,
-                cwd=root,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            command,
+            cwd=root,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
         lines: queue.Queue[str | None] = queue.Queue()
 
         def read_output() -> None:
@@ -132,9 +132,7 @@ class ModelFreeValidator:
             output_lines.append("Validation timed out")
             for step_id, event in tuple(latest_steps.items()):
                 if event.status == "running":
-                    timeout_event = StepValidationEvent(
-                        step_id, event.action, "timeout"
-                    )
+                    timeout_event = StepValidationEvent(step_id, event.action, "timeout")
                     latest_steps[step_id] = timeout_event
                     if event_sink is not None:
                         event_sink(timeout_event)
@@ -159,9 +157,7 @@ def _parse_step_event(line: str) -> StepValidationEvent | None:
         "timeout",
     }:
         return None
-    return StepValidationEvent(
-        status=parts[1], step_id=parts[2], action=parts[3]
-    )
+    return StepValidationEvent(status=parts[1], step_id=parts[2], action=parts[3])
 
 
 __all__ = [

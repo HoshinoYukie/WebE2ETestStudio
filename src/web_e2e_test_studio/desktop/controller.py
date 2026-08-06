@@ -36,9 +36,7 @@ class RecordingEngine(Protocol):
 
     def activate_page(self, page_id: str) -> DesktopRecordingSnapshot: ...
 
-    def set_preview_listener(
-        self, listener: Callable[[Observation, str], None]
-    ) -> None: ...
+    def set_preview_listener(self, listener: Callable[[Observation, str], None]) -> None: ...
 
     def run_ai(
         self,
@@ -52,9 +50,11 @@ class RecordingEngine(Protocol):
         self, tool_ref: str, arguments: Sequence[str] = ()
     ) -> DesktopRecordingSnapshot: ...
 
-    def run_http_request(
-        self, request: dict[str, Any]
-    ) -> DesktopRecordingSnapshot: ...
+    def run_http_request(self, request: dict[str, Any]) -> DesktopRecordingSnapshot: ...
+
+    def run_recorded_step(
+        self, step_id: str
+    ) -> tuple[dict[str, JsonValue], DesktopRecordingSnapshot]: ...
 
     def import_and_launch_tool(
         self, path: str | Path, arguments: Sequence[str] = ()
@@ -69,6 +69,10 @@ class RecordingEngine(Protocol):
 
     def define_variable(
         self, name: str, description: str
+    ) -> tuple[VariableDefinition, str, DesktopRecordingSnapshot]: ...
+
+    def extract_variable(
+        self, name: str, description: str, source: str, file_path: str = ""
     ) -> tuple[VariableDefinition, str, DesktopRecordingSnapshot]: ...
 
     def stop(self) -> DesktopRecordingSnapshot: ...
@@ -130,6 +134,12 @@ class DesktopStudioController:
     def resume(self, config: DesktopRecordingConfig) -> None:
         self._submit(_Command("resume", config=config))
 
+    def resume_and_run_step(self, config: DesktopRecordingConfig, step_id: str) -> None:
+        self._events.put(
+            StudioEvent(kind="progress", message=f"Preparing recorded step: {step_id}")
+        )
+        self._submit(_Command("resume_and_run_step", config=config, value=step_id))
+
     def sync_manual(self) -> None:
         self._submit(_Command("sync_manual"))
 
@@ -148,9 +158,7 @@ class DesktopStudioController:
         self._submit(_Command("register_tool", value=str(path)))
 
     def run_tool(self, tool_ref: str, arguments: Sequence[str] = ()) -> None:
-        self._submit(
-            _Command("run_tool", value=tool_ref, arguments=tuple(arguments))
-        )
+        self._submit(_Command("run_tool", value=tool_ref, arguments=tuple(arguments)))
 
     def run_http_request(self, request: dict[str, Any]) -> None:
         method = str(request.get("method", "")).upper()
@@ -163,9 +171,7 @@ class DesktopStudioController:
         )
         self._submit(_Command("run_http_request", payload=dict(request)))
 
-    def import_and_launch_tool(
-        self, path: str | Path, arguments: Sequence[str] = ()
-    ) -> None:
+    def import_and_launch_tool(self, path: str | Path, arguments: Sequence[str] = ()) -> None:
         self._events.put(
             StudioEvent(
                 kind="progress",
@@ -184,9 +190,7 @@ class DesktopStudioController:
         self._submit(_Command("save"))
 
     def validate_export(self) -> None:
-        self._events.put(
-            StudioEvent(kind="progress", message="Running model-free validation")
-        )
+        self._events.put(StudioEvent(kind="progress", message="Running model-free validation"))
         self._submit(_Command("validate_export"))
 
     def define_variable(self, name: str, description: str) -> None:
@@ -195,6 +199,21 @@ class DesktopStudioController:
                 "define_variable",
                 value=name,
                 payload={"description": description},
+            )
+        )
+
+    def extract_variable(
+        self, name: str, description: str, source: str, file_path: str = ""
+    ) -> None:
+        self._submit(
+            _Command(
+                "extract_variable",
+                value=name,
+                payload={
+                    "description": description,
+                    "source": source,
+                    "file_path": file_path,
+                },
             )
         )
 
@@ -254,28 +273,32 @@ class DesktopStudioController:
                 )
 
     def _execute(self, command: _Command) -> None:
-        if command.kind in {"start", "resume"}:
+        if command.kind in {"start", "resume", "resume_and_run_step"}:
             if command.config is None:
-                raise ValueError(
-                    f"{command.kind.title()} requires a recording configuration"
-                )
+                raise ValueError(f"{command.kind.title()} requires a recording configuration")
             if self._engine is not None:
                 self._engine.stop()
             self._engine = self._engine_factory(command.config)
-            set_preview_listener = getattr(
-                self._engine, "set_preview_listener", None
-            )
+            set_preview_listener = getattr(self._engine, "set_preview_listener", None)
             if callable(set_preview_listener):
                 set_preview_listener(self._emit_stream_frame)
-            snapshot = (
-                self._engine.resume()
-                if command.kind == "resume"
-                else self._engine.start()
-            )
+            snapshot = self._engine.start() if command.kind == "start" else self._engine.resume()
+            if command.kind == "resume_and_run_step":
+                replay_result, snapshot = self._engine.run_recorded_step(command.value)
+                self._events.put(
+                    StudioEvent(
+                        kind="historical_step_executed",
+                        message=(
+                            f"Recorded step {replay_result['status']}: "
+                            f"{replay_result['action']}"
+                        ),
+                        snapshot=snapshot,
+                        payload=replay_result,
+                    )
+                )
+                return
             self._emit(
-                "Recording resumed"
-                if command.kind == "resume"
-                else "Recording started",
+                "Recording resumed" if command.kind == "resume" else "Recording started",
                 snapshot,
             )
             return
@@ -319,9 +342,7 @@ class DesktopStudioController:
             )
         elif command.kind == "run_http_request":
             snapshot = engine.run_http_request(command.payload)
-            output = snapshot.steps[-1].verification.evidence.get(
-                "output", {}
-            )
+            output = snapshot.steps[-1].verification.evidence.get("output", {})
             self._emit(
                 "HTTP request completed and recorded",
                 snapshot,
@@ -330,22 +351,16 @@ class DesktopStudioController:
         elif command.kind == "import_and_launch_tool":
             self._emit(
                 f"Application imported, launched, and recorded: {command.value}",
-                engine.import_and_launch_tool(
-                    command.value, command.arguments
-                ),
+                engine.import_and_launch_tool(command.value, command.arguments),
             )
         elif command.kind == "save":
             self._emit("Asset and Pytest file saved", engine.save())
         elif command.kind == "validate_export":
-            validation_result, snapshot = engine.validate_export(
-                self._emit_validation_step
-            )
+            validation_result, snapshot = engine.validate_export(self._emit_validation_step)
             self._emit_validation_result(validation_result, snapshot)
         elif command.kind == "define_variable":
             description = str(command.payload.get("description", ""))
-            definition, value, snapshot = engine.define_variable(
-                command.value, description
-            )
+            definition, value, snapshot = engine.define_variable(command.value, description)
             self._events.put(
                 StudioEvent(
                     kind="variable_defined",
@@ -354,6 +369,27 @@ class DesktopStudioController:
                     payload={
                         "name": definition.name,
                         "description": definition.description,
+                        "reference": f"${{VAR:{definition.name}}}",
+                        "value": value,
+                    },
+                )
+            )
+        elif command.kind == "extract_variable":
+            definition, value, snapshot = engine.extract_variable(
+                command.value,
+                str(command.payload.get("description", "")),
+                str(command.payload.get("source", "")),
+                str(command.payload.get("file_path", "")),
+            )
+            self._events.put(
+                StudioEvent(
+                    kind="variable_extracted",
+                    message=f"Extracted variable: {definition.name}",
+                    snapshot=snapshot,
+                    payload={
+                        "name": definition.name,
+                        "description": definition.description,
+                        "source": str(definition.options.get("source", "")),
                         "reference": f"${{VAR:{definition.name}}}",
                         "value": value,
                     },
@@ -411,9 +447,7 @@ class DesktopStudioController:
             )
         )
 
-    def _emit_stream_frame(
-        self, observation: Observation, page_id: str
-    ) -> None:
+    def _emit_stream_frame(self, observation: Observation, page_id: str) -> None:
         event = StudioEvent(
             kind="browser_preview",
             message="Live browser frame",

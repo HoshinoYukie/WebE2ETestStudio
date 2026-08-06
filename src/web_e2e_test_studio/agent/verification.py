@@ -54,6 +54,19 @@ class DeterministicVerifier:
                 "The spreadsheet query returned matching values",
                 evidence=evidence,
             )
+        if action.name == "extract_value":
+            value = result.output.get("value")
+            if not isinstance(value, (str, int, float, bool)):
+                return VerificationResult(
+                    VerificationStatus.REJECTED,
+                    "The page extraction returned no scalar value",
+                    evidence=evidence,
+                )
+            return VerificationResult(
+                VerificationStatus.VERIFIED,
+                "The page value was extracted deterministically",
+                evidence=evidence,
+            )
         if action.name == "launch_application":
             running = result.output.get("running")
             pid = result.output.get("pid")

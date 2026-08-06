@@ -234,6 +234,23 @@ def test_exporter_supports_builtin_spreadsheet_action_without_tool_ref() -> None
         id="asset_spreadsheet",
         name="Spreadsheet extraction",
         goal="Extract a bulk installation link",
+        metadata={
+            "variable_definitions": [
+                {
+                    "name": "bulk_link",
+                    "description": "Read bulk installation link",
+                    "kind": "spreadsheet_value",
+                    "options": {
+                        "source": "spreadsheet",
+                        "file_path": "downloads/Devices.xlsx",
+                        "query": "bulk installation link",
+                        "sheet": "",
+                        "cell": "B2",
+                        "captured_value": "https://recording-only.example",
+                    },
+                }
+            ]
+        },
         steps=[
             _recorded_step(
                 "s01",
@@ -242,6 +259,8 @@ def test_exporter_supports_builtin_spreadsheet_action_without_tool_ref() -> None
                 arguments={
                     "file_path": "downloads/Devices.xlsx",
                     "query": "bulk installation link",
+                    "cell": "B2",
+                    "variable_name": "bulk_link",
                 },
             )
         ],
@@ -250,6 +269,8 @@ def test_exporter_supports_builtin_spreadsheet_action_without_tool_ref() -> None
     source = PytestExporter().render(asset)
 
     assert "_extract_spreadsheet(" in source
+    assert "VARIABLES['bulk_link'] = _matches_bulk_link[0]['value']" in source
+    assert "https://recording-only.example" not in source
     assert "subprocess.run" not in source
     ast.parse(source)
 
@@ -302,10 +323,7 @@ def test_render_produces_standalone_model_free_pytest_for_recorded_steps() -> No
     assert "def test_checkout_happy_path(page: Page) -> None:" in source
 
     assert "page.goto('https://shop.example.test/cart')" in source
-    assert (
-        "page.get_by_role('button', name='Buy now', exact=True).nth(1).click()"
-        in source
-    )
+    assert "page.get_by_role('button', name='Buy now', exact=True).nth(1).click()" in source
     assert "page.get_by_label('Email', exact=True).fill('buyer@example.test')" in source
     assert "page.get_by_placeholder('Promo code', exact=True).press('Enter')" in source
     assert "page.locator('#shipping-speed').select_option('express')" in source
@@ -315,22 +333,12 @@ def test_render_produces_standalone_model_free_pytest_for_recorded_steps() -> No
     assert "expect(page.get_by_role('status', exact=True)).to_contain_text(" in source
     assert "'Order confirmed'" in source
     assert "expect(page.locator('[data-receipt]')).to_be_visible()" in source
-    assert (
-        "page.screenshot(path='artifacts/receipt.png', full_page=True)"
-        in source
-    )
+    assert "page.screenshot(path='artifacts/receipt.png', full_page=True)" in source
 
     assert "subprocess.run(" in source
-    assert (
-        "['python', '-m', 'receipt_helper', os.environ['ORDER_ID']]"
-        in source
-    )
+    assert "['python', '-m', 'receipt_helper', os.environ['ORDER_ID']]" in source
     assert "cwd=os.environ['HELPER_ROOT']" in source
-    assert (
-        "env={**os.environ, 'API_TOKEN': os.environ['RECEIPT_TOKEN'], "
-        "'MODE': 'test'}"
-        in source
-    )
+    assert "env={**os.environ, 'API_TOKEN': os.environ['RECEIPT_TOKEN'], 'MODE': 'test'}" in source
     assert "timeout=12.5" in source
     assert "check=True" in source
 
@@ -379,6 +387,10 @@ def test_export_renders_http_api_action_without_agent_runtime() -> None:
                     "headers": {"X-Test": "true"},
                     "json": {"name": "book"},
                     "expected_status": 201,
+                    "response_assertions": [
+                        {"path": "data.id", "operator": "equals", "expected": 42},
+                        {"path": "error", "operator": "not_exists"},
+                    ],
                 },
             )
         ],
@@ -390,6 +402,8 @@ def test_export_renders_http_api_action_without_agent_runtime() -> None:
     assert "urllib.request" in source
     assert "https://api.example.test/items" in source
     assert "expected_status=201" in source
+    assert "_assert_json_response" in source
+    assert "'path': 'data.id'" in source
     assert "openai" not in source.lower()
 
 
@@ -435,7 +449,6 @@ def test_render_accepts_registry_portable_manifest_and_action_overrides() -> Non
     assert "'--json', 'invoice 123'" in source
     assert "cwd=PROJECT_ROOT / 'tools' / 'receipt' / 'runtime'" in source
     assert (
-        "env={**os.environ, 'MODE': 'recorded', "
-        "'ACTION_TOKEN': os.environ['ACTION_TOKEN']}"
+        "env={**os.environ, 'MODE': 'recorded', 'ACTION_TOKEN': os.environ['ACTION_TOKEN']}"
     ) in source
     assert "timeout=5" in source

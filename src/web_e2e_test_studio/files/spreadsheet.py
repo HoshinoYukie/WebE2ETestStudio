@@ -42,6 +42,8 @@ def spreadsheet_action_spec() -> ActionSpec:
             "file_path": "string",
             "query": "string",
             "sheet": "string",
+            "cell": "string",
+            "variable_name": "string",
         },
     )
 
@@ -57,15 +59,12 @@ class SpreadsheetExtractor:
         file_path = _required_text(action, "file_path")
         query = _required_text(action, "query")
         requested_sheet = _optional_text(action, "sheet")
+        requested_cell = _optional_text(action, "cell")
         path = Path(file_path).expanduser().resolve()
         if not any(_is_relative_to(path, root) for root in self._allowed_roots):
-            return ActionResult.failed(
-                f"Spreadsheet is outside the allowed workspace: {path}"
-            )
+            return ActionResult.failed(f"Spreadsheet is outside the allowed workspace: {path}")
         if path.suffix.lower() not in _SUPPORTED_SUFFIXES:
-            return ActionResult.failed(
-                "extract_spreadsheet supports only .xlsx and .xlsm files"
-            )
+            return ActionResult.failed("extract_spreadsheet supports only .xlsx and .xlsm files")
         if not path.is_file():
             return ActionResult.failed(f"Spreadsheet file not found: {path}")
         if path.stat().st_size > _MAX_FILE_BYTES:
@@ -74,14 +73,58 @@ class SpreadsheetExtractor:
             matches = _extract_matches(path, query, requested_sheet)
         except (BadZipFile, ElementTree.ParseError, KeyError, OSError) as exc:
             return ActionResult.failed(f"Could not read spreadsheet: {exc}")
-        return ActionResult.succeeded(
-            {
-                "file_path": str(path),
-                "query": query,
-                "matches": matches,
-                "match_count": len(matches),
-            }
-        )
+        if requested_cell:
+            matches = [
+                match
+                for match in matches
+                if isinstance(match, dict)
+                and str(match.get("cell", "")).upper() == requested_cell.upper()
+            ]
+        variable_name = _optional_text(action, "variable_name")
+        if variable_name and len(matches) != 1:
+            return ActionResult.failed(
+                f"Variable extraction requires exactly one spreadsheet value; "
+                f"matched {len(matches)}"
+            )
+        output: dict[str, JsonValue] = {
+            "file_path": str(path),
+            "query": query,
+            "matches": matches,
+            "match_count": len(matches),
+        }
+        if variable_name:
+            match = matches[0]
+            if not isinstance(match, dict):
+                return ActionResult.failed("Spreadsheet match is not an object")
+            output.update(
+                {
+                    "variable_name": variable_name,
+                    "value": match.get("value", ""),
+                }
+            )
+        return ActionResult.succeeded(output)
+
+    def context(self, file_path: str, *, max_cells: int = 500) -> str:
+        """Return bounded workbook cells for authoring-time model grounding."""
+        path = Path(file_path).expanduser().resolve()
+        if not any(_is_relative_to(path, root) for root in self._allowed_roots):
+            raise ValueError(f"Spreadsheet is outside the allowed workspace: {path}")
+        if path.suffix.lower() not in _SUPPORTED_SUFFIXES or not path.is_file():
+            raise ValueError(f"Spreadsheet file is unavailable: {path}")
+        if path.stat().st_size > _MAX_FILE_BYTES:
+            raise ValueError("Spreadsheet exceeds the 50 MiB limit")
+        rows: list[str] = []
+        with ZipFile(path) as archive:
+            _validate_archive(archive)
+            shared_strings = _shared_strings(archive)
+            for sheet, worksheet_path in _worksheet_paths(archive):
+                for cell, value in _worksheet_cells(
+                    archive.read(worksheet_path), shared_strings
+                ).items():
+                    rows.append(f"{sheet}!{cell}={value}")
+                    if len(rows) >= max_cells:
+                        return "\n".join(rows)
+        return "\n".join(rows)
 
 
 def _extract_matches(
@@ -94,18 +137,12 @@ def _extract_matches(
         shared_strings = _shared_strings(archive)
         sheets = _worksheet_paths(archive)
         if requested_sheet:
-            sheets = [
-                item
-                for item in sheets
-                if item[0].casefold() == requested_sheet.casefold()
-            ]
+            sheets = [item for item in sheets if item[0].casefold() == requested_sheet.casefold()]
             if not sheets:
                 raise KeyError(f"Worksheet not found: {requested_sheet}")
         matches: list[JsonValue] = []
         for sheet_name, worksheet_path in sheets:
-            cells = _worksheet_cells(
-                archive.read(worksheet_path), shared_strings
-            )
+            cells = _worksheet_cells(archive.read(worksheet_path), shared_strings)
             matches.extend(_query_matches(sheet_name, cells, query))
             if len(matches) >= _MAX_MATCHES:
                 break
@@ -116,20 +153,12 @@ def _validate_archive(archive: ZipFile) -> None:
     total_uncompressed = 0
     for item in archive.infolist():
         if item.file_size > _MAX_ENTRY_BYTES:
-            raise ValueError(
-                f"Spreadsheet entry is too large: {item.filename}"
-            )
+            raise ValueError(f"Spreadsheet entry is too large: {item.filename}")
         total_uncompressed += item.file_size
         if total_uncompressed > _MAX_UNCOMPRESSED_BYTES:
             raise ValueError("Spreadsheet uncompressed content is too large")
-        if (
-            item.compress_size > 0
-            and item.file_size / item.compress_size > _MAX_COMPRESSION_RATIO
-        ):
-            raise ValueError(
-                f"Spreadsheet entry has an unsafe compression ratio: "
-                f"{item.filename}"
-            )
+        if item.compress_size > 0 and item.file_size / item.compress_size > _MAX_COMPRESSION_RATIO:
+            raise ValueError(f"Spreadsheet entry has an unsafe compression ratio: {item.filename}")
 
 
 def _shared_strings(archive: ZipFile) -> list[str]:
@@ -145,9 +174,7 @@ def _shared_strings(archive: ZipFile) -> list[str]:
 
 def _worksheet_paths(archive: ZipFile) -> list[tuple[str, str]]:
     workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
-    relationships = ElementTree.fromstring(
-        archive.read("xl/_rels/workbook.xml.rels")
-    )
+    relationships = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
     targets = {
         item.attrib["Id"]: item.attrib["Target"]
         for item in relationships.findall(f"{{{_PACKAGE_REL_NS}}}Relationship")
@@ -160,9 +187,7 @@ def _worksheet_paths(archive: ZipFile) -> list[tuple[str, str]]:
         relationship_id = sheet.attrib[f"{{{_REL_NS}}}id"]
         target = PurePosixPath(targets[relationship_id])
         worksheet_path = (
-            target.as_posix()
-            if target.is_absolute()
-            else (PurePosixPath("xl") / target).as_posix()
+            target.as_posix() if target.is_absolute() else (PurePosixPath("xl") / target).as_posix()
         ).lstrip("/")
         result.append((sheet.attrib["name"], worksheet_path))
     return result
@@ -178,9 +203,7 @@ def _worksheet_cells(
         reference = cell.attrib.get("r", "")
         value = ""
         if cell.attrib.get("t") == "inlineStr":
-            value = "".join(
-                node.text or "" for node in cell.iter(f"{{{_MAIN_NS}}}t")
-            )
+            value = "".join(node.text or "" for node in cell.iter(f"{{{_MAIN_NS}}}t"))
         else:
             value_node = cell.find(f"{{{_MAIN_NS}}}v")
             if value_node is not None:
@@ -223,9 +246,7 @@ def _query_matches(
                     }
                 )
         else:
-            matches.append(
-                {"sheet": sheet, "cell": reference, "value": value}
-            )
+            matches.append({"sheet": sheet, "cell": reference, "value": value})
     return matches
 
 
@@ -233,16 +254,8 @@ def _matches_query(value: str, folded_query: str) -> bool:
     folded_value = value.casefold()
     if folded_query in folded_value or folded_value in folded_query:
         return True
-    value_tokens = {
-        token
-        for token in _QUERY_TOKEN.findall(folded_value)
-        if len(token) >= 2
-    }
-    query_tokens = {
-        token
-        for token in _QUERY_TOKEN.findall(folded_query)
-        if len(token) >= 2
-    }
+    value_tokens = {token for token in _QUERY_TOKEN.findall(folded_value) if len(token) >= 2}
+    query_tokens = {token for token in _QUERY_TOKEN.findall(folded_query) if len(token) >= 2}
     return bool(value_tokens) and value_tokens <= query_tokens
 
 

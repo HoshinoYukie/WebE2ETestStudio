@@ -41,6 +41,9 @@ def test_http_capability_is_self_describing_and_executes_structured_request() ->
             "json": {"name": "book"},
             "expected_status": 201,
             "timeout": 5,
+            "response_assertions": [
+                {"path": "id", "operator": "equals", "expected": 42}
+            ],
         },
     )
     spec = http_action_spec()
@@ -57,6 +60,26 @@ def test_http_capability_is_self_describing_and_executes_structured_request() ->
     assert result.success
     assert result.output["status"] == 201
     assert result.output["json"] == {"id": 42}
+
+
+def test_http_capability_rejects_a_failed_json_response_assertion() -> None:
+    action = Action(
+        name="http_request",
+        channel=ActionChannel.API,
+        arguments={
+            "method": "GET",
+            "url": "https://api.example.test/items/42",
+            "expected_status": 201,
+            "response_assertions": [
+                {"path": "id", "operator": "equals", "expected": 7}
+            ],
+        },
+    )
+
+    result = HttpActionExecutor(urlopen=lambda request, timeout: FakeResponse()).execute(action)
+
+    assert not result.success
+    assert "JSON response assertion failed" in (result.error or "")
 
 
 def test_http_response_read_is_interrupted_by_cancellation() -> None:

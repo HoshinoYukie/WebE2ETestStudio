@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TypeGuard
 
 from web_e2e_test_studio.agent.actions import resolve_wait_milliseconds
+from web_e2e_test_studio.api.response_assertions import parse_response_assertions
 from web_e2e_test_studio.domain import (
     Action,
     ActionChannel,
@@ -19,7 +20,59 @@ from web_e2e_test_studio.domain import (
 _ENV_REFERENCE = re.compile(r"\$\{ENV:([A-Za-z_][A-Za-z0-9_]*)\}")
 _VARIABLE_REFERENCE = re.compile(r"\$\{VAR:([A-Za-z_][A-Za-z0-9_]*)\}")
 
-_HTTP_HELPER = """def _http_request(
+_HTTP_HELPER = """_JSON_MISSING = object()
+
+
+def _json_path_value(payload: object, path: str) -> object:
+    current = payload
+    for segment in path.split("."):
+        if isinstance(current, dict) and segment in current:
+            current = current[segment]
+        elif isinstance(current, list) and segment.isdigit() and int(segment) < len(current):
+            current = current[int(segment)]
+        else:
+            return _JSON_MISSING
+    return current
+
+
+def _assert_json_response(payload: object, assertions: list[dict[str, object]]) -> None:
+    for assertion in assertions:
+        path = str(assertion["path"])
+        operator = str(assertion["operator"])
+        expected = assertion.get("expected")
+        actual = _json_path_value(payload, path)
+        equal = (
+            actual is not _JSON_MISSING
+            and type(actual) is type(expected)
+            and actual == expected
+        )
+        if operator == "exists":
+            matches = actual is not _JSON_MISSING
+        elif operator == "not_exists":
+            matches = actual is _JSON_MISSING
+        elif operator == "equals":
+            matches = equal
+        elif operator == "not_equals":
+            matches = actual is not _JSON_MISSING and not equal
+        elif operator == "contains":
+            matches = (
+                isinstance(actual, str) and isinstance(expected, str) and expected in actual
+            ) or (
+                isinstance(actual, list)
+                and any(type(item) is type(expected) and item == expected for item in actual)
+            ) or (
+                isinstance(actual, dict) and isinstance(expected, str) and expected in actual
+            )
+        else:
+            raise AssertionError(f"Unsupported response assertion operator: {operator}")
+        actual_text = "<missing>" if actual is _JSON_MISSING else repr(actual)
+        assert matches, (
+            f"JSON response assertion failed at {path!r}: "
+            f"{operator} {expected!r}; actual={actual_text}"
+        )
+
+
+def _http_request(
     *,
     method: str,
     url: str,
@@ -28,6 +81,7 @@ _HTTP_HELPER = """def _http_request(
     body: str | None,
     expected_status: int,
     timeout: float,
+    response_assertions: list[dict[str, object]],
 ) -> bytes:
     request_headers = dict(headers)
     data = body.encode("utf-8") if body is not None else None
@@ -50,6 +104,14 @@ _HTTP_HELPER = """def _http_request(
             f"Expected HTTP {expected_status}, received {response.status}: "
             f"{payload.decode('utf-8', errors='replace')}"
         )
+        if response_assertions:
+            try:
+                json_payload = json.loads(payload)
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise AssertionError(
+                    "HTTP response assertions require a valid JSON response"
+                ) from error
+            _assert_json_response(json_payload, response_assertions)
         return payload"""
 
 _DOWNLOAD_HELPER = """def _download(
@@ -165,7 +227,7 @@ _SPREADSHEET_HELPER = """def _extract_spreadsheet(
         assert matches, f"No spreadsheet values matched query: {query}"
         return matches"""
 
-_STEP_REPORTER = '''@contextmanager
+_STEP_REPORTER = """@contextmanager
 def _validation_step(step_id: str, action: str) -> Iterator[None]:
     prefix = "__WEB_E2E_STEP__"
     print(f"{prefix}|running|{step_id}|{action}", flush=True)
@@ -175,7 +237,7 @@ def _validation_step(step_id: str, action: str) -> Iterator[None]:
         print(f"{prefix}|failed|{step_id}|{action}", flush=True)
         raise
     else:
-        print(f"{prefix}|passed|{step_id}|{action}", flush=True)'''
+        print(f"{prefix}|passed|{step_id}|{action}", flush=True)"""
 
 
 class PytestExporter:
@@ -184,50 +246,39 @@ class PytestExporter:
     def render(self, asset: TestAsset) -> str:
         """Return a standalone pytest module for ``asset``."""
         has_browser_steps = any(
-            step.action.channel == ActionChannel.BROWSER
-            for step in asset.steps
+            step.action.channel == ActionChannel.BROWSER for step in asset.steps
         )
-        has_api_steps = any(
-            step.action.channel == ActionChannel.API for step in asset.steps
-        )
+        has_api_steps = any(step.action.channel == ActionChannel.API for step in asset.steps)
         has_download_steps = any(
-            step.action.channel == ActionChannel.BROWSER
-            and step.action.name == "download"
+            step.action.channel == ActionChannel.BROWSER and step.action.name == "download"
             for step in asset.steps
         )
         has_external_steps = any(
-            step.action.channel == ActionChannel.EXTERNAL
-            and step.action.tool_ref is not None
+            step.action.channel == ActionChannel.EXTERNAL and step.action.tool_ref is not None
             for step in asset.steps
         )
         has_application_steps = any(
-            step.action.name == "launch_application"
-            for step in asset.steps
+            step.action.name == "launch_application" for step in asset.steps
         )
         has_spreadsheet_steps = any(
-            step.action.name == "extract_spreadsheet"
-            for step in asset.steps
+            step.action.name == "extract_spreadsheet" for step in asset.steps
         )
         has_portable_tools = any(
             step.action.channel == ActionChannel.EXTERNAL
             and step.action.tool_ref is not None
-            and "command"
-            not in asset.tool_dependencies.get(step.action.tool_ref, {})
+            and "command" not in asset.tool_dependencies.get(step.action.tool_ref, {})
             for step in asset.steps
         )
         variable_definitions = _used_variable_definitions(asset)
         has_environment_references = any(
-            _contains_environment_reference(step.action.arguments)
-            for step in asset.steps
+            _contains_environment_reference(step.action.arguments) for step in asset.steps
         )
         imports: list[str] = []
         if asset.steps:
             imports.append("from contextlib import contextmanager")
             imports.append("from collections.abc import Iterator")
         if has_api_steps:
-            imports.extend(
-                ["import json", "import urllib.error", "import urllib.request"]
-            )
+            imports.extend(["import json", "import urllib.error", "import urllib.request"])
         if has_external_steps:
             imports.extend(["import os", "import subprocess"])
         elif has_environment_references:
@@ -257,16 +308,11 @@ class PytestExporter:
             imports.append("from pathlib import Path")
         imports.extend(["", "import pytest"])
         if has_browser_steps:
-            imports.append(
-                "from playwright.sync_api import Page, sync_playwright, expect"
-            )
-        fixture = (
-            self._render_page_fixture(asset) if has_browser_steps else ""
-        )
+            imports.append("from playwright.sync_api import Page, sync_playwright, expect")
+        fixture = self._render_page_fixture(asset) if has_browser_steps else ""
         body = [self._render_step(asset, step) for step in asset.steps]
         if any(
-            step.action.name
-            in {"bind_page", "switch_page", "close_page", "open_popup"}
+            step.action.name in {"bind_page", "switch_page", "close_page", "open_popup"}
             for step in asset.steps
         ):
             body.insert(0, "pages: dict[str, Page] = {'main': page}")
@@ -291,13 +337,11 @@ class PytestExporter:
         if has_portable_tools:
             sections.append(
                 "PROJECT_ROOT = Path(\n"
-                "    os.environ.get(\"WEB_E2E_PROJECT_ROOT\", Path.cwd())\n"
+                '    os.environ.get("WEB_E2E_PROJECT_ROOT", Path.cwd())\n'
                 ").resolve()"
             )
         if variable_definitions:
-            sections.append(
-                _render_generated_variables(variable_definitions)
-            )
+            sections.append(_render_generated_variables(variable_definitions))
         if has_api_steps:
             sections.append(_HTTP_HELPER)
         if has_download_steps:
@@ -315,14 +359,8 @@ class PytestExporter:
 
     def _render_step(self, asset: TestAsset, step: RecordedStep) -> str:
         action_source = self._render_action(asset, step.action)
-        nested = "\n".join(
-            f"    {line}" if line else ""
-            for line in action_source.splitlines()
-        )
-        return (
-            f"with _validation_step({step.id!r}, {step.action.name!r}):\n"
-            f"{nested}"
-        )
+        nested = "\n".join(f"    {line}" if line else "" for line in action_source.splitlines())
+        return f"with _validation_step({step.id!r}, {step.action.name!r}):\n{nested}"
 
     def export(self, asset: TestAsset, path: str | Path) -> Path:
         """Write the rendered pytest module to ``path`` and return that path."""
@@ -332,9 +370,7 @@ class PytestExporter:
         return destination
 
     def _render_page_fixture(self, asset: TestAsset) -> str:
-        context_arguments = (
-            f"base_url={asset.base_url!r}" if asset.base_url else ""
-        )
+        context_arguments = f"base_url={asset.base_url!r}" if asset.base_url else ""
         return "\n".join(
             [
                 "@pytest.fixture()",
@@ -355,10 +391,26 @@ class PytestExporter:
                 file_path = _string_argument(action, "file_path")
                 query = _string_argument(action, "query")
                 sheet = _string_argument(action, "sheet", default="")
-                return (
-                    f"_extract_spreadsheet({file_path!r}, "
-                    f"{query!r}, {sheet!r})"
-                )
+                variable_name = _string_argument(action, "variable_name", default="")
+                cell = _string_argument(action, "cell", default="")
+                if variable_name:
+                    result_name = f"_matches_{variable_name}"
+                    selection = (
+                        f"[item for item in {result_name} "
+                        f"if item['cell'].upper() == {cell.upper()!r}]"
+                        if cell
+                        else result_name
+                    )
+                    return (
+                        f"{result_name} = _extract_spreadsheet("
+                        f"{file_path!r}, {query!r}, {sheet!r})\n"
+                        f"{result_name} = {selection}\n"
+                        f"assert len({result_name}) == 1, "
+                        f"'Variable extraction requires exactly one value'\n"
+                        f"VARIABLES[{variable_name!r}] = "
+                        f"{result_name}[0]['value']"
+                    )
+                return f"_extract_spreadsheet({file_path!r}, {query!r}, {sheet!r})"
             return self._render_external_action(asset, action)
         if action.channel == ActionChannel.API:
             return self._render_api_action(action)
@@ -388,11 +440,7 @@ class PytestExporter:
             page_ref = _string_argument(action, "page_ref")
             target = _locator_expression(_required_locator(action))
             timeout = _optional_number_argument(action, "timeout")
-            timeout_option = (
-                f"timeout={_number_literal(timeout)}"
-                if timeout is not None
-                else ""
-            )
+            timeout_option = f"timeout={_number_literal(timeout)}" if timeout is not None else ""
             return (
                 f"with page.expect_popup({timeout_option}) as popup_info:\n"
                 f"    {target}.click({timeout_option})\n"
@@ -403,6 +451,19 @@ class PytestExporter:
 
         target = _locator_expression(_required_locator(action))
         operation_options = _browser_timeout_options(action)
+        if name == "extract_value":
+            variable_name = _string_argument(action, "variable_name")
+            read = _string_argument(action, "read", default="text")
+            if read == "text":
+                expression = f"{target}.inner_text({operation_options})"
+            elif read == "value":
+                expression = f"{target}.input_value({operation_options})"
+            elif read == "attribute":
+                attribute = _string_argument(action, "attribute")
+                expression = f"{target}.get_attribute({attribute!r}, {operation_options})"
+            else:
+                raise ValueError(f"Unsupported extraction read mode: {read}")
+            return f"VARIABLES[{variable_name!r}] = {expression}"
         if name == "click":
             return f"{target}.click({operation_options})"
         if name == "download":
@@ -443,21 +504,13 @@ class PytestExporter:
             timeout = _optional_number_argument(action, "timeout")
             if timeout is None and action.timeout_seconds is not None:
                 timeout = action.timeout_seconds * 1000
-            suffix = (
-                f", timeout={_number_literal(timeout)}"
-                if timeout is not None
-                else ""
-            )
+            suffix = f", timeout={_number_literal(timeout)}" if timeout is not None else ""
             return f"expect({target}).to_contain_text({expected!r}{suffix})"
         if name == "assert_visible":
             timeout = _optional_number_argument(action, "timeout")
             if timeout is None and action.timeout_seconds is not None:
                 timeout = action.timeout_seconds * 1000
-            arguments = (
-                f"timeout={_number_literal(timeout)}"
-                if timeout is not None
-                else ""
-            )
+            arguments = f"timeout={_number_literal(timeout)}" if timeout is not None else ""
             return f"expect({target}).to_be_visible({arguments})"
         raise ValueError(f"Unsupported browser action: {name!r}")
 
@@ -473,14 +526,13 @@ class PytestExporter:
         if body is not None and not isinstance(body, str):
             raise ValueError("http_request body must be a string")
         expected_status = action.arguments.get("expected_status", 200)
-        if (
-            isinstance(expected_status, bool)
-            or not isinstance(expected_status, int)
-        ):
+        if isinstance(expected_status, bool) or not isinstance(expected_status, int):
             raise ValueError("http_request expected_status must be an integer")
         timeout = _optional_number_argument(action, "timeout")
         if timeout is None:
             timeout = action.timeout_seconds
+        response_assertions = action.arguments.get("response_assertions", [])
+        parse_response_assertions(response_assertions)
         return (
             "_http_request("
             f"method={_string_expression(method)}, "
@@ -490,6 +542,7 @@ class PytestExporter:
             f"body={_value_expression(body)}, "
             f"expected_status={expected_status!r}, "
             f"timeout={_number_literal(timeout) if timeout is not None else '30'}"
+            f", response_assertions={_value_expression(response_assertions)}"
             ")"
         )
 
@@ -503,9 +556,7 @@ class PytestExporter:
                 if not isinstance(state, str):
                     raise ValueError("wait argument 'state' must be a string")
                 keyword_arguments.append(f"state={state!r}")
-            keyword_arguments.append(
-                f"timeout={_number_literal(duration)}"
-            )
+            keyword_arguments.append(f"timeout={_number_literal(duration)}")
             return f"{target}.wait_for({', '.join(keyword_arguments)})"
 
         return f"page.wait_for_timeout({_number_literal(duration)})"
@@ -520,19 +571,11 @@ class PytestExporter:
         full_page = action.arguments.get("full_page")
         if full_page is not None:
             if not isinstance(full_page, bool):
-                raise ValueError(
-                    "screenshot argument 'full_page' must be a boolean"
-                )
+                raise ValueError("screenshot argument 'full_page' must be a boolean")
             if action.locator is not None:
-                raise ValueError(
-                    "full_page is only supported for page screenshots"
-                )
+                raise ValueError("full_page is only supported for page screenshots")
             arguments.append(f"full_page={full_page!r}")
-        target = (
-            _locator_expression(action.locator)
-            if action.locator is not None
-            else "page"
-        )
+        target = _locator_expression(action.locator) if action.locator is not None else "page"
         return f"{target}.screenshot({', '.join(arguments)})"
 
     def _render_external_action(
@@ -545,9 +588,7 @@ class PytestExporter:
         try:
             dependency = asset.tool_dependencies[action.tool_ref]
         except KeyError as error:
-            raise ValueError(
-                f"Unknown external tool dependency: {action.tool_ref!r}"
-            ) from error
+            raise ValueError(f"Unknown external tool dependency: {action.tool_ref!r}") from error
 
         command = dependency.get("command")
         if command is not None:
@@ -586,9 +627,7 @@ class PytestExporter:
             cwd_expression = (
                 default_cwd
                 if command is None
-                else _string_expression(
-                    _required_string(default_cwd, "External tool cwd")
-                )
+                else _string_expression(_required_string(default_cwd, "External tool cwd"))
             )
             keyword_arguments.append(f"cwd={cwd_expression}")
 
@@ -601,13 +640,10 @@ class PytestExporter:
         }
         if environment:
             environment_items = ", ".join(
-                f"{key!r}: {_string_expression(value)}"
-                for key, value in environment.items()
+                f"{key!r}: {_string_expression(value)}" for key, value in environment.items()
             )
             environment_expression = (
-                "{**os.environ"
-                + (f", {environment_items}" if environment_items else "")
-                + "}"
+                "{**os.environ" + (f", {environment_items}" if environment_items else "") + "}"
             )
             keyword_arguments.append(f"env={environment_expression}")
 
@@ -631,10 +667,7 @@ class PytestExporter:
         )
         if timeout is not None:
             if not _is_number(timeout):
-                raise ValueError(
-                    f"Tool dependency {action.tool_ref!r} timeout "
-                    "must be numeric"
-                )
+                raise ValueError(f"Tool dependency {action.tool_ref!r} timeout must be numeric")
             keyword_arguments.append(f"timeout={_number_literal(timeout)}")
         keyword_arguments.append("check=True")
 
@@ -675,9 +708,7 @@ def _portable_command_parts(
     elif kind == "exe":
         parts = [entry_expression]
     else:
-        raise ValueError(
-            f"Tool dependency {tool_ref!r} has unsupported kind {kind!r}"
-        )
+        raise ValueError(f"Tool dependency {tool_ref!r} has unsupported kind {kind!r}")
     parts.extend(
         _string_expression(part)
         for part in _string_list(
@@ -696,11 +727,7 @@ def _browser_timeout_options(action: Action) -> str:
     timeout = _optional_number_argument(action, "timeout")
     if timeout is None and action.timeout_seconds is not None:
         timeout = action.timeout_seconds * 1000
-    return (
-        f"timeout={_number_literal(timeout)}"
-        if timeout is not None
-        else ""
-    )
+    return f"timeout={_number_literal(timeout)}" if timeout is not None else ""
 
 
 def _portable_cwd_expression(
@@ -709,11 +736,7 @@ def _portable_cwd_expression(
 ) -> str:
     root = _required_string(dependency.get("root"), "External tool root")
     raw_cwd = action.arguments.get("cwd")
-    cwd = (
-        _required_string(raw_cwd, "External action cwd")
-        if raw_cwd is not None
-        else ""
-    )
+    cwd = _required_string(raw_cwd, "External action cwd") if raw_cwd is not None else ""
     return _joined_path_expression(root, cwd)
 
 
@@ -744,9 +767,7 @@ def _string_list(
     *,
     non_empty: bool = False,
 ) -> list[str]:
-    if not isinstance(value, list) or not all(
-        isinstance(part, str) for part in value
-    ):
+    if not isinstance(value, list) or not all(isinstance(part, str) for part in value):
         raise ValueError(f"{label} must be a list of strings")
     if non_empty and not value:
         raise ValueError(f"{label} must not be empty")
@@ -755,8 +776,7 @@ def _string_list(
 
 def _string_mapping(value: JsonValue, label: str) -> dict[str, str]:
     if not isinstance(value, dict) or not all(
-        isinstance(key, str) and isinstance(item, str)
-        for key, item in value.items()
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
     ):
         raise ValueError(f"{label} must map strings to strings")
     return {str(key): str(item) for key, item in value.items()}
@@ -771,12 +791,16 @@ def _required_string(value: JsonValue, label: str) -> str:
 def _test_name(name: str, asset_id: str) -> str:
     stem = re.sub(r"\W+", "_", name, flags=re.UNICODE).strip("_").casefold()
     if not stem:
-        stem = re.sub(
-            r"\W+",
-            "_",
-            asset_id,
-            flags=re.UNICODE,
-        ).strip("_").casefold()
+        stem = (
+            re.sub(
+                r"\W+",
+                "_",
+                asset_id,
+                flags=re.UNICODE,
+            )
+            .strip("_")
+            .casefold()
+        )
     return f"test_{stem or 'recorded_flow'}"
 
 
@@ -795,37 +819,24 @@ def _locator_expression(locator: Locator) -> str:
         arguments.append(f"exact={locator.exact!r}")
         expression = f"page.get_by_role({', '.join(arguments)})"
     elif strategy == "label":
-        expression = (
-            f"page.get_by_label({locator.value!r}, exact={locator.exact!r})"
-        )
+        expression = f"page.get_by_label({locator.value!r}, exact={locator.exact!r})"
     elif strategy == "text":
-        expression = (
-            f"page.get_by_text({locator.value!r}, exact={locator.exact!r})"
-        )
+        expression = f"page.get_by_text({locator.value!r}, exact={locator.exact!r})"
     elif strategy == "placeholder":
-        expression = (
-            "page.get_by_placeholder("
-            f"{locator.value!r}, exact={locator.exact!r})"
-        )
+        expression = f"page.get_by_placeholder({locator.value!r}, exact={locator.exact!r})"
     elif strategy in {"test_id", "testid"}:
         expression = f"page.get_by_test_id({locator.value!r})"
     elif strategy in {"css", "xpath", "selector"}:
         expression = f"page.locator({locator.value!r})"
     elif strategy in {"alt_text", "alt"}:
-        expression = (
-            f"page.get_by_alt_text({locator.value!r}, exact={locator.exact!r})"
-        )
+        expression = f"page.get_by_alt_text({locator.value!r}, exact={locator.exact!r})"
     elif strategy == "title":
-        expression = (
-            f"page.get_by_title({locator.value!r}, exact={locator.exact!r})"
-        )
+        expression = f"page.get_by_title({locator.value!r}, exact={locator.exact!r})"
     else:
         raise ValueError(f"Unsupported locator strategy: {locator.strategy!r}")
 
     if locator.fallbacks:
-        alternatives = [
-            _locator_expression(fallback) for fallback in locator.fallbacks
-        ]
+        alternatives = [_locator_expression(fallback) for fallback in locator.fallbacks]
         expression = (
             "("
             + expression
@@ -848,9 +859,7 @@ def _string_argument(
         value = action.arguments.get(candidate)
         if value is not None:
             if not isinstance(value, str):
-                raise ValueError(
-                    f"{action.name} argument {candidate!r} must be a string"
-                )
+                raise ValueError(f"{action.name} argument {candidate!r} must be a string")
             return value
     if default is not None:
         return default
@@ -860,9 +869,7 @@ def _string_argument(
 def _select_option_expression(action: Action) -> str:
     if "values" in action.arguments:
         values = action.arguments["values"]
-        if not isinstance(values, list) or not all(
-            isinstance(value, str) for value in values
-        ):
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
             raise ValueError("select argument 'values' must be a list of strings")
         return repr(values)
     for key in ("value", "label", "index"):
@@ -927,39 +934,47 @@ def _value_expression(value: JsonValue) -> str:
     if isinstance(value, list):
         return "[" + ", ".join(_value_expression(item) for item in value) + "]"
     if isinstance(value, dict):
-        return "{" + ", ".join(
-            f"{key!r}: {_value_expression(item)}"
-            for key, item in value.items()
-        ) + "}"
+        return (
+            "{"
+            + ", ".join(f"{key!r}: {_value_expression(item)}" for key, item in value.items())
+            + "}"
+        )
     return repr(value)
 
 
 def _used_variable_definitions(
     asset: TestAsset,
 ) -> dict[str, dict[str, JsonValue]]:
-    used = set().union(
-        *(
-            _referenced_variable_names(step.action.arguments)
-            for step in asset.steps
-        )
-    ) if asset.steps else set()
+    used = (
+        set().union(*(_referenced_variable_names(step.action.arguments) for step in asset.steps))
+        if asset.steps
+        else set()
+    )
+    used.update(
+        str(step.action.arguments.get("variable_name", ""))
+        for step in asset.steps
+        if step.action.name in {"extract_value", "extract_spreadsheet"}
+        and step.action.arguments.get("variable_name")
+    )
     if not used:
         return {}
     raw_definitions = asset.metadata.get("variable_definitions", [])
     if not isinstance(raw_definitions, list):
         raise ValueError("Asset variable_definitions must be a list")
     definitions = {
-        str(item.get("name", "")): dict(item)
-        for item in raw_definitions
-        if isinstance(item, dict)
+        str(item.get("name", "")): dict(item) for item in raw_definitions if isinstance(item, dict)
     }
     missing = used - definitions.keys()
     if missing:
-        raise ValueError(
-            "Missing generated variable definitions: "
-            + ", ".join(sorted(missing))
-        )
-    return {name: definitions[name] for name in sorted(used)}
+        raise ValueError("Missing generated variable definitions: " + ", ".join(sorted(missing)))
+    selected = {name: definitions[name] for name in sorted(used)}
+    for definition in selected.values():
+        options = definition.get("options")
+        if isinstance(options, dict):
+            definition["options"] = {
+                key: value for key, value in options.items() if key != "captured_value"
+            }
+    return selected
 
 
 def _referenced_variable_names(value: JsonValue) -> set[str]:
@@ -967,15 +982,11 @@ def _referenced_variable_names(value: JsonValue) -> set[str]:
         return set(_VARIABLE_REFERENCE.findall(value))
     if isinstance(value, list):
         return (
-            set().union(*(_referenced_variable_names(item) for item in value))
-            if value
-            else set()
+            set().union(*(_referenced_variable_names(item) for item in value)) if value else set()
         )
     if isinstance(value, dict):
         return (
-            set().union(
-                *(_referenced_variable_names(item) for item in value.values())
-            )
+            set().union(*(_referenced_variable_names(item) for item in value.values()))
             if value
             else set()
         )
@@ -995,7 +1006,7 @@ def _contains_environment_reference(value: JsonValue) -> bool:
 def _render_generated_variables(
     definitions: dict[str, dict[str, JsonValue]],
 ) -> str:
-    return f'''_VARIABLE_DEFINITIONS = {definitions!r}
+    return f"""_VARIABLE_DEFINITIONS = {definitions!r}
 
 
 def _generate_variable(definition: dict[str, object]) -> str:
@@ -1028,7 +1039,8 @@ def _generate_variable(definition: dict[str, object]) -> str:
 VARIABLES = {{
     name: _generate_variable(definition)
     for name, definition in _VARIABLE_DEFINITIONS.items()
-}}'''
+    if definition["kind"] not in {{"page_value", "spreadsheet_value"}}
+}}"""
 
 
 __all__ = ["PytestExporter"]

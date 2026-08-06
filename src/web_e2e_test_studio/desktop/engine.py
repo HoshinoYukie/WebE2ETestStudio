@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from web_e2e_test_studio.agent import ActionSpec, AuthoringAgent
+from web_e2e_test_studio.agent import (
+    ActionSpec,
+    AuthoringAgent,
+    ExecutionRunner,
+    PlanCompiler,
+    PlannedAction,
+    PlanningResult,
+)
 from web_e2e_test_studio.agent.control import (
     ActionExecutionContext,
     CancellationToken,
@@ -54,12 +62,14 @@ from web_e2e_test_studio.domain import (
     ActionChannel,
     ActionResult,
     JsonValue,
+    Locator,
     Observation,
     RecordedStep,
     StepSource,
     utc_now,
 )
 from web_e2e_test_studio.exporters import PytestExporter
+from web_e2e_test_studio.files import SpreadsheetExtractor
 from web_e2e_test_studio.recording import RecordingSession
 from web_e2e_test_studio.recording.manual import BrowserEventRecorder
 from web_e2e_test_studio.storage import JsonAssetStore
@@ -68,6 +78,7 @@ from web_e2e_test_studio.variables import (
     VariableDefinition,
     VariableRegistry,
     VLMVariableDefinitionCompiler,
+    VLMVariableExtractionCompiler,
 )
 
 
@@ -83,6 +94,7 @@ class DesktopRecordingConfig:
     workspace: Path
     tools: tuple[Path, ...] = ()
     headless: bool = False
+    checkpoint_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +127,8 @@ class DesktopRecordingEngine:
         planner_factory: Callable[[], Planner] | None = None,
         validator: ModelFreeValidator | None = None,
         variable_compiler: Callable[[str, str], VariableDefinition] | None = None,
+        variable_extraction_compiler: Callable[[str, str, str, str, str], VariableDefinition]
+        | None = None,
     ) -> None:
         self._config = config
         self._asset_path = config.asset_path.resolve()
@@ -155,9 +169,10 @@ class DesktopRecordingEngine:
         self._active_cancellation: CancellationToken | None = None
         self._validator = validator or ModelFreeValidator()
         self._variable_compiler = variable_compiler or _compile_variable_from_env
-        self._variables = VariableRegistry(
-            definition_compiler=self._variable_compiler
+        self._variable_extraction_compiler = (
+            variable_extraction_compiler or _compile_variable_extraction_from_env
         )
+        self._variables = VariableRegistry(definition_compiler=self._variable_compiler)
         self._preview_listener: Callable[[Observation, str], None] | None = None
 
     def start(self) -> DesktopRecordingSnapshot:
@@ -199,7 +214,8 @@ class DesktopRecordingEngine:
         """Restore verified state and reopen the last known browser page."""
         if self._running:
             raise RuntimeError("The recording session is already running")
-        checkpoint = self._checkpoint_store.load(self._asset_path.with_suffix(".run.json"))
+        checkpoint_path = self._config.checkpoint_path or self._asset_path.with_suffix(".run.json")
+        checkpoint = self._checkpoint_store.load(checkpoint_path)
         if checkpoint.asset_path != self._asset_path:
             raise ValueError("Checkpoint asset does not match this session")
         self._checkpoint = checkpoint
@@ -272,6 +288,20 @@ class DesktopRecordingEngine:
         original_instruction = self._checkpoint.active_instruction or response_text
         text = str(self._variables.resolve(response_text))
         first_new_step = len(self._session.asset.steps)
+        manual_steps: tuple[RecordedStep, ...] = ()
+        if self._browser_started:
+            manual_steps = tuple(
+                _sync_manual_events(
+                    self._recorder,
+                    _require_page(self._device.page),
+                    self._session,
+                    self._device,
+                    self._verifier,
+                    self._actions,
+                )
+            )
+            if manual_steps:
+                self.save()
         if self._checkpoint.pending_question and self._checkpoint.active_instruction:
             text = (
                 f"Continue the original request:\n{original_instruction}\n\n"
@@ -294,6 +324,11 @@ class DesktopRecordingEngine:
 
         def checkpoint_event(event: AgentEvent) -> None:
             if event.kind == "done":
+                if manual_steps:
+                    payload = dict(event.payload)
+                    payload["verified_steps"] = _event_verified_steps(payload) + len(manual_steps)
+                    payload["status"] = "completed"
+                    event = replace(event, payload=payload)
                 deferred_done_events.append(event)
                 return
             changes: dict[str, Any] = {}
@@ -348,6 +383,26 @@ class DesktopRecordingEngine:
                 text,
                 initial_memories=self._checkpoint.memories,
             )
+            if manual_steps:
+                corrected_events = tuple(
+                    replace(
+                        event,
+                        payload={
+                            **event.payload,
+                            "verified_steps": _event_verified_steps(event.payload)
+                            + len(manual_steps),
+                            "status": "completed",
+                        },
+                    )
+                    if event.kind == "done"
+                    else event
+                    for event in result.events
+                )
+                result = replace(
+                    result,
+                    events=corrected_events,
+                    steps=(*manual_steps, *result.steps),
+                )
         except Exception as exc:
             failure = self._checkpoint.last_failure or classify_exception(exc)
             self._checkpoint = self._checkpoint.updated(
@@ -458,6 +513,77 @@ class DesktopRecordingEngine:
                     break
         return self.save()
 
+    def run_recorded_step(
+        self, step_id: str
+    ) -> tuple[dict[str, JsonValue], DesktopRecordingSnapshot]:
+        """Execute one trusted persisted step without duplicating the asset step."""
+        self._require_running()
+        recorded = next(
+            (step for step in self._session.asset.steps if step.id == step_id),
+            None,
+        )
+        if recorded is None:
+            raise ValueError(f"Recorded step not found: {step_id}")
+
+        resolved_arguments = self._variables.resolve(recorded.action.arguments)
+        if not isinstance(resolved_arguments, dict):
+            raise TypeError("Resolved step arguments must be an object")
+        action = replace(recorded.action, arguments=dict(resolved_arguments))
+        tasks = PlanCompiler(self._actions).compile(
+            PlanningResult.actions(
+                (
+                    PlannedAction(
+                        action,
+                        recorded.intent,
+                        recorded.expected_result,
+                    ),
+                )
+            )
+        )
+        scratch = RecordingSession.create(
+            name=f"single-step-{self._session.asset.name}",
+            goal=recorded.intent,
+            base_url=self._session.asset.base_url,
+        )
+        cancellation = CancellationToken()
+        self._active_cancellation = cancellation
+        try:
+            execution = ExecutionRunner(
+                observer=self,
+                verifier=self._verifier,
+                actions=self._actions,
+                cancellation=cancellation,
+            ).run(scratch, tasks, source=StepSource.USER)
+        finally:
+            self._active_cancellation = None
+        record = execution.records[0]
+        result: dict[str, JsonValue] = {
+            "step_id": recorded.id,
+            "action": recorded.action.name,
+            "channel": recorded.action.channel.value,
+            "status": record.status.value,
+            "result": {
+                "status": record.result.status.value,
+                "error": record.result.error,
+                "error_category": record.result.error_category,
+            },
+            "verification": {
+                "status": record.verification.status.value,
+                "reason": record.verification.reason,
+            },
+            "failure": record.failure.to_dict() if record.failure else None,
+        }
+        self._session.asset.execution_history.append(
+            {
+                "kind": "historical_step_execution",
+                "executed_at": utc_now(),
+                **result,
+            }
+        )
+        self._store.save(self._session.asset, self._asset_path)
+        self._last_observation = record.after
+        return result, self.snapshot()
+
     def define_variable(
         self, name: str, description: str
     ) -> tuple[VariableDefinition, str, DesktopRecordingSnapshot]:
@@ -466,6 +592,58 @@ class DesktopRecordingEngine:
         definition, value = self._variables.define(name, description)
         self._persist_variable_definitions()
         return definition, value, self.save()
+
+    def extract_variable(
+        self,
+        name: str,
+        description: str,
+        source: str,
+        file_path: str = "",
+    ) -> tuple[VariableDefinition, str, DesktopRecordingSnapshot]:
+        """Extract one scalar through a deterministic browser or workbook rule."""
+        self._require_running()
+        if source == "page":
+            self._ensure_browser_started()
+            observation = self.observe()
+            context = json.dumps(
+                {
+                    "url": observation.url,
+                    "title": observation.title,
+                    "page_text": observation.page_text,
+                    "interactive_elements": observation.interactive_elements,
+                },
+                ensure_ascii=False,
+            )
+        elif source == "spreadsheet":
+            context = SpreadsheetExtractor((self._workspace, self._asset_path.parent)).context(
+                file_path
+            )
+        else:
+            raise ValueError("Variable extraction source must be page or spreadsheet")
+        definition = self._variable_extraction_compiler(
+            name, description, source, context, file_path
+        )
+        action = _variable_extraction_action(definition)
+        attempt_count = len(self._session.attempts)
+        step = _execute_and_record(
+            session=self._session,
+            action=action,
+            intent=f"Extract variable {name} from {source}",
+            expected_result=f"Exactly one scalar value is stored as {name}",
+            source=StepSource.USER,
+            device=self,
+            actions=self._actions,
+            verifier=self._verifier,
+        )
+        if step is None or len(self._session.attempts) == attempt_count:
+            raise RuntimeError(f"Could not extract variable {name}")
+        result = self._session.attempts[-1].result
+        value = result.output.get("value")
+        if not result.success or not isinstance(value, (str, int, float, bool)):
+            raise RuntimeError(result.error or f"Variable {name} has no scalar value")
+        stored, preview = self._variables.store(definition, str(value))
+        self._persist_variable_definitions()
+        return stored, preview, self.save()
 
     def import_and_launch_tool(
         self, path: str | Path, arguments: Sequence[str] = ()
@@ -706,9 +884,62 @@ def _planner_from_env() -> Planner:
     return StructuredVLMPlanner(OpenAICompatibleVLMBackend.from_env())
 
 
+def _event_verified_steps(payload: dict[str, JsonValue]) -> int:
+    value = payload.get("verified_steps", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 def _compile_variable_from_env(name: str, description: str) -> VariableDefinition:
     compiler = VLMVariableDefinitionCompiler(OpenAICompatibleVLMBackend.from_env(timeout=30))
     return compiler.compile(name, description)
+
+
+def _compile_variable_extraction_from_env(
+    name: str,
+    description: str,
+    source: str,
+    context: str,
+    file_path: str,
+) -> VariableDefinition:
+    compiler = VLMVariableExtractionCompiler(OpenAICompatibleVLMBackend.from_env(timeout=30))
+    return compiler.compile(
+        name,
+        description,
+        source=source,
+        context=context,
+        file_path=file_path,
+    )
+
+
+def _variable_extraction_action(definition: VariableDefinition) -> Action:
+    options = definition.options
+    if definition.kind == "page_value":
+        raw_locator = options.get("locator")
+        if not isinstance(raw_locator, dict):
+            raise ValueError("Page variable rule has no locator")
+        return Action(
+            name="extract_value",
+            channel=ActionChannel.BROWSER,
+            locator=Locator.from_dict(raw_locator),
+            arguments={
+                "variable_name": definition.name,
+                "read": str(options.get("read", "text")),
+                "attribute": str(options.get("attribute", "")),
+            },
+        )
+    if definition.kind == "spreadsheet_value":
+        return Action(
+            name="extract_spreadsheet",
+            channel=ActionChannel.EXTERNAL,
+            arguments={
+                "variable_name": definition.name,
+                "file_path": str(options.get("file_path", "")),
+                "query": str(options.get("query", "")),
+                "sheet": str(options.get("sheet", "")),
+                "cell": str(options.get("cell", "")),
+            },
+        )
+    raise ValueError(f"Unsupported extraction definition: {definition.kind}")
 
 
 __all__ = [

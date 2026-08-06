@@ -14,12 +14,7 @@ def test_desktop_ui_starts_session_and_renders_bridge_event() -> None:
     from playwright.sync_api import sync_playwright
 
     page_path = (
-        Path(__file__).parents[2]
-        / "src"
-        / "web_e2e_test_studio"
-        / "desktop"
-        / "web"
-        / "index.html"
+        Path(__file__).parents[2] / "src" / "web_e2e_test_studio" / "desktop" / "web" / "index.html"
     )
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -63,12 +58,25 @@ def test_desktop_ui_starts_session_and_renders_bridge_event() -> None:
                 return {accepted: true};
               },
               poll_events: async () => {
-                if (!window.__studioCalls.length || window.__eventSent) return [];
+                if (
+                  !window.__studioCalls.some(call => call[0] === "start_session")
+                  || window.__eventSent
+                ) return [];
                 window.__eventSent = true;
                 return [{
                   kind: "snapshot",
                   message: "Recording started",
                   details: [],
+                  payload: {
+                    lifecycle: {
+                      phase: "failed",
+                      transitions: [{phase: "running"}, {phase: "failed"}]
+                    },
+                    failure: {
+                      category: "timeout", code: "action_timeout",
+                      message: "Action timed out", recoverable: true
+                    }
+                  },
                   snapshot: {
                     running: true,
                     step_count: 0,
@@ -107,8 +115,31 @@ def test_desktop_ui_starts_session_and_renders_bridge_event() -> None:
               save: async () => ({accepted: true}),
               register_tool: async () => ({accepted: true}),
               run_tool: async () => ({accepted: true})
+              ,extract_variable: async (payload) => {
+                window.__studioCalls.push(["extract_variable", JSON.parse(payload)]);
+                return {accepted: true};
+              }
+              ,choose_spreadsheet: async () => ({path: "C:/out/Devices.xlsx"})
+              ,inspect_session: async (path) => ({
+                name: "saved-flow", goal: "Resume", state: "suspended",
+                round: 2, last_url: "https://example.test", pending_question: "",
+                last_error: "", updated_at: "2026-08-06T08:00:00Z",
+                checkpoint_path: path,
+                steps: [{
+                  id: "step_history_2", index: 2, action: "click", channel: "browser",
+                  intent: "Create proposal", expected_result: "Proposal form opens",
+                  arguments: {},
+                  locator: {strategy: "role", value: "link", name: "Create Proposal"},
+                  verification: {status: "verified", reason: "Click succeeded", evidence: {}},
+                  source: "agent"
+                }]
+              })
               ,resume_session: async (path) => {
                 window.__studioCalls.push(["resume_session", path]);
+                return {accepted: true};
+              }
+              ,run_historical_step: async (payload) => {
+                window.__studioCalls.push(["run_historical_step", JSON.parse(payload)]);
                 return {accepted: true};
               }
               ,discard_session: async () => ({discarded: true})
@@ -116,12 +147,38 @@ def test_desktop_ui_starts_session_and_renders_bridge_event() -> None:
             """
         )
         page.goto(page_path.as_uri())
-        page.evaluate(
-            "window.dispatchEvent(new Event('pywebviewready'))"
-        )
+        page.evaluate("window.dispatchEvent(new Event('pywebviewready'))")
         page.locator("#status").get_by_text("Model unavailable").wait_for()
         assert page.locator("#sendButton").is_disabled()
         assert page.locator("#sessions").get_by_text("saved-flow").is_visible()
+        page.locator("#sessions").get_by_text("saved-flow").click()
+        assert page.locator("#historyDialog").evaluate("dialog => dialog.open")
+        assert page.locator("#historyGoal").inner_text() == "Resume"
+        assert page.locator("#historySteps .history-step").count() == 1
+        page.locator("#historySteps .history-step").click()
+        assert not page.locator("#historyDialog").evaluate("dialog => dialog.open")
+        assert page.locator('#stepsPanel').evaluate("panel => panel.classList.contains('active')")
+        assert (
+            page.locator('#timeline .step.selected').get_attribute("data-step-id")
+            == "step_history_2"
+        )
+        assert "Create Proposal" in page.locator("#stepInspector").inner_text()
+        page.locator("#runHistoricalStep").click()
+        page.wait_for_function(
+            "window.__studioCalls.some(call => call[0] === 'run_historical_step')"
+        )
+        historical_call = page.evaluate(
+            "window.__studioCalls.find(call => call[0] === 'run_historical_step')"
+        )
+        assert historical_call[1]["step_id"] == "step_history_2"
+        assert historical_call[1]["confirmed"] is False
+        page.locator("#sessions").get_by_text("saved-flow").click()
+        assert not any(
+            call[0] == "resume_session" for call in page.evaluate("window.__studioCalls")
+        )
+        page.locator("#continueHistory").click()
+        page.wait_for_function("window.__studioCalls.some(call => call[0] === 'resume_session')")
+        page.evaluate("window.__studioCalls = []; window.__eventSent = false")
         page.locator("#sessions").evaluate(
             """
             sessions => {
@@ -162,30 +219,52 @@ def test_desktop_ui_starts_session_and_renders_bridge_event() -> None:
         page.locator("#status").get_by_text("Running").wait_for()
         assert page.locator("#assetArtifact small").inner_text() == "C:\\out\\flow.json"
         assert page.locator("#runPanel .event-card").count() == 1
-        assert page.locator("#browserFrame img").get_attribute("src").startswith(
-            "data:image/png;base64,"
+        event_details = page.locator("#runPanel .event-details").inner_text()
+        assert "[object Object]" not in event_details
+        assert "action_timeout" in event_details
+        assert "Action timed out" in event_details
+        assert "phase" in event_details
+        assert (
+            page.locator("#browserFrame img")
+            .get_attribute("src")
+            .startswith("data:image/png;base64,")
         )
         assert page.locator("#browserTabs .browser-tab").count() == 2
-        assert page.locator(
-            "#browserTabs .browser-tab.active"
-        ).inner_text().strip().endswith("Export")
+        assert (
+            page.locator("#browserTabs .browser-tab.active").inner_text().strip().endswith("Export")
+        )
         assert page.locator("#variableQuickPanel").is_visible()
-        assert page.locator("#variableQuickList .variable-item").get_attribute(
-            "draggable"
-        ) == "true"
+        assert (
+            page.locator("#variableQuickList .variable-item").get_attribute("draggable") == "true"
+        )
         page.locator("#variableQuickList .variable-item").click()
         assert page.locator("#prompt").input_value() == "${VAR:order_id}"
-        assert page.locator(
-            ".token-editor-prompt .variable-token-chip"
-        ).inner_text().startswith("order_id")
-        page.locator(
-            ".token-editor-prompt .variable-token-remove"
-        ).click()
-        assert page.locator("#prompt").input_value() == ""
-        page.get_by_role("button", name="Devices").click()
-        assert ["activate_page", "page_1"] in page.evaluate(
-            "window.__studioCalls"
+        assert (
+            page.locator(".token-editor-prompt .variable-token-chip")
+            .inner_text()
+            .startswith("order_id")
         )
+        page.locator(".token-editor-prompt .variable-token-remove").click()
+        assert page.locator("#prompt").input_value() == ""
+        page.get_by_role("button", name="Capabilities").click()
+        page.locator("#variableName").fill("bulk_link")
+        page.locator("#variableSource").select_option("spreadsheet")
+        page.locator("#variableExtraction").fill("Find the bulk installation link")
+        page.locator("#chooseVariableFile").click()
+        assert page.locator("#variableFilePath").input_value() == "C:/out/Devices.xlsx"
+        page.locator("#extractVariable").click()
+        page.wait_for_function("window.__studioCalls.some(call => call[0] === 'extract_variable')")
+        extraction = page.evaluate(
+            "window.__studioCalls.find(call => call[0] === 'extract_variable')[1]"
+        )
+        assert extraction == {
+            "name": "bulk_link",
+            "description": "Find the bulk installation link",
+            "source": "spreadsheet",
+            "file_path": "C:/out/Devices.xlsx",
+        }
+        page.get_by_role("button", name="Devices").click()
+        assert ["activate_page", "page_1"] in page.evaluate("window.__studioCalls")
 
         page.get_by_role("button", name="Model settings").click()
         assert page.locator("#modelDialog").evaluate("dialog => dialog.open")

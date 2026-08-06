@@ -34,9 +34,7 @@ def test_model_free_validator_runs_exact_export_without_model_credentials(
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
-    result = ModelFreeValidator(timeout_seconds=12).run(
-        test_path, workspace=tmp_path
-    )
+    result = ModelFreeValidator(timeout_seconds=12).run(test_path, workspace=tmp_path)
 
     assert result.passed is True
     assert result.exit_code == 0
@@ -49,9 +47,7 @@ def test_model_free_validator_runs_exact_export_without_model_credentials(
     assert options["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
 
 
-def test_model_free_validator_reports_pytest_failure(
-    tmp_path: Path, monkeypatch
-) -> None:  # noqa: ANN001
+def test_model_free_validator_reports_pytest_failure(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     test_path = tmp_path / "test_exported.py"
     test_path.write_text("def test_exported():\n    assert False\n", encoding="utf-8")
 
@@ -83,9 +79,7 @@ def test_model_free_validator_executes_a_real_standalone_pytest(
         encoding="utf-8",
     )
 
-    result = ModelFreeValidator(timeout_seconds=30).run(
-        test_path, workspace=tmp_path
-    )
+    result = ModelFreeValidator(timeout_seconds=30).run(test_path, workspace=tmp_path)
 
     assert result.passed is True
     assert result.exit_code == 0
@@ -111,7 +105,5 @@ def test_model_free_validator_streams_and_collects_step_events(
     )
 
     assert [event.status for event in events] == ["running", "passed"]
-    assert result.steps == (
-        StepValidationEvent("step_1", "navigate", "passed"),
-    )
+    assert result.steps == (StepValidationEvent("step_1", "navigate", "passed"),)
     assert "__WEB_E2E_STEP__" not in result.output

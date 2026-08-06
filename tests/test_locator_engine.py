@@ -86,6 +86,37 @@ def test_locator_engine_rejects_ambiguous_candidate_and_uses_unique_role() -> No
     assert rejected.reason == "matched 3 elements"
 
 
+def test_locator_engine_rejects_visible_candidate_that_cannot_receive_clicks() -> None:
+    requested = Locator("role", "link", name="Create Proposal")
+    observation = Observation(
+        interactive_elements=(
+            {
+                "role": "link",
+                "name": "Create Proposal",
+                "text": "Create Proposal",
+            },
+        )
+    )
+
+    resolution = LocatorEngine().resolve(
+        requested,
+        observation,
+        lambda locator: LocatorProbe(
+            count=1,
+            visible=True,
+            enabled=True,
+            actionable=locator.strategy == "text",
+        ),
+    )
+
+    assert resolution.selected.strategy == "text"
+    role = next(
+        item for item in resolution.candidates if item.locator.strategy == "role"
+    )
+    assert role.viable is False
+    assert "pointer" in role.reason
+
+
 def test_locator_engine_returns_auditable_failure() -> None:
     with pytest.raises(LocatorResolutionError) as raised:
         LocatorEngine().resolve(

@@ -12,32 +12,50 @@ from typing import Any
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from web_e2e_test_studio.agent.planner import OpenAICompatibleVLMBackend
+from web_e2e_test_studio.api.response_assertions import parse_response_assertions
 from web_e2e_test_studio.capabilities import default_capabilities
 from web_e2e_test_studio.config import (
     configure_playwright_browsers,
     load_dotenv,
+    update_dotenv,
 )
 from web_e2e_test_studio.desktop.controller import DesktopStudioController
 from web_e2e_test_studio.desktop.engine import DesktopRecordingConfig
 from web_e2e_test_studio.desktop.recovery import RunCheckpointStore
+from web_e2e_test_studio.runtime_paths import RuntimePaths
+from web_e2e_test_studio.storage import JsonAssetStore
 
 
 class StudioBridge:
     """Translate WebView calls into the Studio's threaded command protocol."""
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        runtime_paths: RuntimePaths | None = None,
+    ) -> None:
         self.workspace = workspace.resolve()
-        application_root = Path(__file__).resolve().parents[3]
+        self.runtime_paths = runtime_paths or RuntimePaths.discover()
+        self.runtime_paths.ensure()
         self.playwright_browsers = configure_playwright_browsers(
             self.workspace,
-            application_root=application_root,
+            application_root=self.runtime_paths.application_dir,
+            managed_roots=(self.runtime_paths.browser_dir,),
+            bundled_roots=self.runtime_paths.bundled_browser_candidates,
         )
+        self.user_dotenv_path = self.runtime_paths.user_env_path
+        self.user_dotenv_loaded = load_dotenv(self.user_dotenv_path)
         self.dotenv_path = self.workspace / ".env"
         self.dotenv_loaded = load_dotenv(self.dotenv_path)
         self._model_source = (
             str(self.dotenv_path)
             if {"VLM_API_KEY", "OPENAI_API_KEY"} & self.dotenv_loaded
-            else "process environment"
+            else (
+                str(self.user_dotenv_path)
+                if {"VLM_API_KEY", "OPENAI_API_KEY"} & self.user_dotenv_loaded
+                else "process environment"
+            )
         )
         self.controller = DesktopStudioController()
         self._checkpoint_store = RunCheckpointStore(self.workspace)
@@ -50,27 +68,30 @@ class StudioBridge:
     def bootstrap(self) -> dict[str, Any]:
         return {
             "workspace": str(self.workspace),
+            "application_data": {
+                "path": str(self.runtime_paths.data_dir),
+                "config": str(self.runtime_paths.config_dir),
+                "browsers": str(self.runtime_paths.browser_dir),
+                "sessions": str(self.runtime_paths.session_dir),
+                "logs": str(self.runtime_paths.log_dir),
+                "cache": str(self.runtime_paths.cache_dir),
+            },
             "dotenv": {
                 "path": str(self.dotenv_path),
                 "loaded": bool(self.dotenv_loaded),
+                "user_path": str(self.user_dotenv_path),
+                "user_loaded": bool(self.user_dotenv_loaded),
             },
             "playwright": {
                 "configured": self.playwright_browsers is not None,
                 "path": (
-                    str(self.playwright_browsers)
-                    if self.playwright_browsers is not None
-                    else ""
+                    str(self.playwright_browsers) if self.playwright_browsers is not None else ""
                 ),
-                "install_command": (
-                    f'"{Path(sys.executable)}" -m playwright install chromium'
-                ),
+                "install_command": (f'"{Path(sys.executable)}" -m playwright install chromium'),
             },
             "model": self.get_model_settings(),
             "recoverable_sessions": self.list_recoverable_sessions(),
-            "capabilities": [
-                capability.to_dict()
-                for capability in default_capabilities()
-            ],
+            "capabilities": [capability.to_dict() for capability in default_capabilities()],
         }
 
     def list_recoverable_sessions(self) -> list[dict[str, Any]]:
@@ -100,33 +121,94 @@ class StudioBridge:
                 output_path=checkpoint.output_path,
                 workspace=checkpoint.workspace,
                 headless=checkpoint.headless,
+                checkpoint_path=Path(checkpoint_path).resolve(),
             )
         )
         return {"accepted": True}
+
+    def run_historical_step(self, payload: Any = None) -> dict[str, bool]:
+        """Resume a persisted session and execute one server-loaded step."""
+        request = _decode_object_payload(payload, "Historical step")
+        checkpoint_path = str(request.get("checkpoint_path", "")).strip()
+        step_id = str(request.get("step_id", "")).strip()
+        if not checkpoint_path or not step_id:
+            raise ValueError("Checkpoint path and step ID are required")
+        checkpoint = self._checkpoint_store.load(checkpoint_path)
+        asset = JsonAssetStore().load(checkpoint.asset_path)
+        step = next((item for item in asset.steps if item.id == step_id), None)
+        if step is None:
+            raise ValueError(f"Recorded step not found: {step_id}")
+        if step.action.channel.value in {"api", "external"} and not bool(
+            request.get("confirmed", False)
+        ):
+            raise ValueError("API and external tool steps require confirmation")
+        self.controller.resume_and_run_step(
+            DesktopRecordingConfig(
+                url=checkpoint.initial_url,
+                goal=checkpoint.goal,
+                name=checkpoint.name,
+                asset_path=checkpoint.asset_path,
+                output_path=checkpoint.output_path,
+                workspace=checkpoint.workspace,
+                headless=checkpoint.headless,
+                checkpoint_path=Path(checkpoint_path).resolve(),
+            ),
+            step_id,
+        )
+        return {"accepted": True}
+
+    def inspect_session(self, checkpoint_path: str) -> dict[str, Any]:
+        """Load persisted metadata without starting an engine or browser."""
+        checkpoint = self._checkpoint_store.load(checkpoint_path)
+        asset = JsonAssetStore().load(checkpoint.asset_path)
+        return {
+            "id": checkpoint.id,
+            "name": checkpoint.name,
+            "goal": checkpoint.goal,
+            "state": checkpoint.state,
+            "round": checkpoint.round_number,
+            "last_url": _safe_display_url(checkpoint.last_url),
+            "pending_question": checkpoint.pending_question,
+            "last_error": checkpoint.last_error,
+            "updated_at": checkpoint.updated_at,
+            "asset_path": str(checkpoint.asset_path),
+            "output_path": str(checkpoint.output_path),
+            "checkpoint_path": str(checkpoint.checkpoint_path),
+            "steps": [
+                {
+                    "id": step.id,
+                    "index": index,
+                    "action": step.action.name,
+                    "channel": step.action.channel.value,
+                    "arguments": _sanitize_step_value(dict(step.action.arguments)),
+                    "locator": (
+                        step.action.locator.to_dict()
+                        if step.action.locator is not None
+                        else None
+                    ),
+                    "intent": step.intent,
+                    "expected_result": step.expected_result,
+                    "source": step.source.value,
+                    "verification": step.verification.to_dict(),
+                    "recorded_at": step.recorded_at,
+                }
+                for index, step in enumerate(asset.steps, start=1)
+            ],
+        }
 
     def discard_session(self, checkpoint_path: str) -> dict[str, bool]:
         self._checkpoint_store.discard(checkpoint_path)
         return {"discarded": True}
 
     def get_model_settings(self) -> dict[str, Any]:
-        api_key = (
-            os.environ.get("VLM_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-            or ""
-        )
+        api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
         return {
             "configured": bool(api_key),
             "key_hint": _key_hint(api_key),
             "model": os.environ.get("VLM_MODEL", "gpt-4o"),
-            "base_url": (
-                os.environ.get("VLM_BASE_URL")
-                or os.environ.get("OPENAI_BASE_URL")
-                or ""
-            ),
+            "base_url": (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or ""),
             "source": self._model_source if api_key else "",
-            "ignore_proxy": os.environ.get(
-                "VLM_IGNORE_PROXY", ""
-            ).strip().lower()
+            "ignore_proxy": os.environ.get("VLM_IGNORE_PROXY", "").strip().lower()
             in {"1", "true", "yes", "on"},
         }
 
@@ -143,20 +225,28 @@ class StudioBridge:
                 raise ValueError("Base URL must be an http(s) URL")
         if api_key:
             os.environ["VLM_API_KEY"] = api_key
-            self._model_source = "Desktop session settings"
+            self._model_source = str(self.user_dotenv_path)
         if bool(config.get("clear_api_key", False)):
             os.environ.pop("VLM_API_KEY", None)
             os.environ.pop("OPENAI_API_KEY", None)
             self._model_source = ""
         os.environ["VLM_MODEL"] = model
-        os.environ["VLM_IGNORE_PROXY"] = (
-            "true" if ignore_proxy else "false"
-        )
+        os.environ["VLM_IGNORE_PROXY"] = "true" if ignore_proxy else "false"
         if base_url:
             os.environ["VLM_BASE_URL"] = base_url
         else:
             os.environ.pop("VLM_BASE_URL", None)
             os.environ.pop("OPENAI_BASE_URL", None)
+        persisted: dict[str, str | None] = {
+            "VLM_MODEL": model,
+            "VLM_BASE_URL": base_url or None,
+            "VLM_IGNORE_PROXY": "true" if ignore_proxy else "false",
+        }
+        if api_key:
+            persisted["VLM_API_KEY"] = api_key
+        elif bool(config.get("clear_api_key", False)):
+            persisted["VLM_API_KEY"] = None
+        update_dotenv(self.user_dotenv_path, persisted)
         self._model_available = False
         return self.get_model_settings()
 
@@ -171,9 +261,7 @@ class StudioBridge:
                 "message": "Configure an API key before checking the model",
             }
         try:
-            response = OpenAICompatibleVLMBackend.from_env(
-                timeout=15.0
-            ).complete_json(
+            response = OpenAICompatibleVLMBackend.from_env(timeout=15.0).complete_json(
                 "Return only a JSON object with status set to ok.",
                 "Desktop Studio model health check.",
                 "",
@@ -195,9 +283,11 @@ class StudioBridge:
 
     def start_session(self, config: dict[str, Any]) -> dict[str, bool]:
         name = str(config.get("name", "")).strip() or "recorded_flow"
-        output_dir = Path(
-            str(config.get("output_dir", self.workspace / "recordings"))
-        ).expanduser().resolve()
+        output_dir = (
+            Path(str(config.get("output_dir", self.workspace / "recordings")))
+            .expanduser()
+            .resolve()
+        )
         self.controller.start(
             DesktopRecordingConfig(
                 url=str(config.get("url", "")).strip(),
@@ -213,9 +303,7 @@ class StudioBridge:
 
     def send_message(self, message: str) -> dict[str, bool]:
         if not self._model_available:
-            raise ValueError(
-                "Verify the model connection before sending an instruction"
-            )
+            raise ValueError("Verify the model connection before sending an instruction")
         self.controller.run_ai(message)
         return {"accepted": True}
 
@@ -242,6 +330,21 @@ class StudioBridge:
         if not name or not description:
             raise ValueError("Variable name and format description are required")
         self.controller.define_variable(name, description)
+        return {"accepted": True}
+
+    def extract_variable(self, payload: Any = None) -> dict[str, bool]:
+        config = _decode_object_payload(payload, "Extracted variable")
+        name = str(config.get("name", "")).strip()
+        description = str(config.get("description", "")).strip()
+        source = str(config.get("source", "")).strip()
+        file_path = str(config.get("file_path", "")).strip()
+        if not name or not description:
+            raise ValueError("Variable name and extraction description are required")
+        if source not in {"page", "spreadsheet"}:
+            raise ValueError("Variable source must be page or spreadsheet")
+        if source == "spreadsheet" and not file_path:
+            raise ValueError("Spreadsheet extraction requires a file path")
+        self.controller.extract_variable(name, description, source, file_path)
         return {"accepted": True}
 
     def stop(self) -> dict[str, bool]:
@@ -293,15 +396,37 @@ class StudioBridge:
         )
         return {"path": str(selected[0]) if selected else ""}
 
+    def choose_spreadsheet(self) -> dict[str, str]:
+        if self._window is None:
+            return {"path": ""}
+        import webview
+
+        selected = self._window.create_file_dialog(
+            webview.FileDialog.OPEN,
+            allow_multiple=False,
+            file_types=("Excel workbook (*.xlsx;*.xlsm)",),
+        )
+        return {"path": str(selected[0]) if selected else ""}
+
+    def choose_output_directory(self) -> dict[str, str]:
+        """Open the native directory picker for a recording session."""
+        if self._window is None:
+            return {"path": ""}
+        import webview
+
+        selected = self._window.create_file_dialog(
+            webview.FileDialog.FOLDER,
+            allow_multiple=False,
+        )
+        return {"path": str(selected[0]) if selected else ""}
+
     def poll_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         for event in self.controller.poll_events():
             payload = dict(event.payload)
             screenshot_path = payload.pop("screenshot_path", "")
             if isinstance(screenshot_path, str) and screenshot_path:
-                payload["screenshot_data_url"] = screenshot_data_url(
-                    screenshot_path
-                )
+                payload["screenshot_data_url"] = screenshot_data_url(screenshot_path)
             if "url" in payload:
                 payload["url"] = _safe_display_url(str(payload["url"]))
             item: dict[str, Any] = {
@@ -313,9 +438,7 @@ class StudioBridge:
             if event.snapshot is not None:
                 snapshot = event.snapshot
                 observation = snapshot.last_observation.to_dict()
-                observation["url"] = _safe_display_url(
-                    snapshot.last_observation.url
-                )
+                observation["url"] = _safe_display_url(snapshot.last_observation.url)
                 observation["screenshot_data_url"] = screenshot_data_url(
                     snapshot.last_observation.screenshot_path
                 )
@@ -344,6 +467,14 @@ class StudioBridge:
                             "channel": step.action.channel.value,
                             "action": step.action.name,
                             "intent": step.intent,
+                            "arguments": _sanitize_step_value(dict(step.action.arguments)),
+                            "locator": (
+                                step.action.locator.to_dict()
+                                if step.action.locator is not None
+                                else None
+                            ),
+                            "expected_result": step.expected_result,
+                            "verification": step.verification.to_dict(),
                         }
                         for step in snapshot.steps
                     ],
@@ -368,6 +499,27 @@ def _safe_display_url(value: str) -> str:
         return ""
     parsed = urlsplit(value)
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _sanitize_step_value(value: Any, *, key: str = "") -> Any:  # noqa: ANN401
+    if key.casefold() in {
+        "api_key",
+        "authorization",
+        "cookie",
+        "password",
+        "secret",
+        "token",
+        "x-api-key",
+    }:
+        return "[REDACTED]"
+    if isinstance(value, list):
+        return [_sanitize_step_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(item_key): _sanitize_step_value(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    return value
 
 
 def _decode_object_payload(
@@ -413,19 +565,12 @@ def _validate_http_request(request: dict[str, Any]) -> None:
     if "json" in request and "body" in request:
         raise ValueError("Choose either JSON or raw body, not both")
     expected = request.get("expected_status", 200)
-    if (
-        isinstance(expected, bool)
-        or not isinstance(expected, int)
-        or not 100 <= expected <= 599
-    ):
+    if isinstance(expected, bool) or not isinstance(expected, int) or not 100 <= expected <= 599:
         raise ValueError("Expected HTTP status must be from 100 to 599")
     timeout = request.get("timeout", 30)
-    if (
-        isinstance(timeout, bool)
-        or not isinstance(timeout, (int, float))
-        or timeout <= 0
-    ):
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ValueError("HTTP timeout must be greater than zero")
+    parse_response_assertions(request.get("response_assertions"))
 
 
 def _safe_model_error(error: Exception) -> str:

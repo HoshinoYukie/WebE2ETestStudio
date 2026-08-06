@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from web_e2e_test_studio.desktop.bridge import StudioBridge
+from web_e2e_test_studio.runtime_paths import RuntimePaths
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,11 +29,16 @@ def main(argv: list[str] | None = None) -> int:
             'python -m pip install -e ".[desktop]"'
         ) from exc
 
-    bridge = StudioBridge(args.workspace)
-    static_dir = Path(__file__).with_name("web")
+    runtime_paths = RuntimePaths.discover()
+    runtime_paths.ensure()
+    if not runtime_paths.web_entrypoint.is_file():
+        raise RuntimeError(
+            f"Desktop web resources were not found: {runtime_paths.web_entrypoint}"
+        )
+    bridge = StudioBridge(args.workspace, runtime_paths=runtime_paths)
     window = webview.create_window(
         "Test Agent Studio",
-        url=str(static_dir / "index.html"),
+        url=str(runtime_paths.web_entrypoint),
         js_api=bridge,
         width=1480,
         height=920,

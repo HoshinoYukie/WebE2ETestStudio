@@ -540,6 +540,7 @@ dialog::backdrop {
   color: #263140;
   font-weight: 600;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .timeline .step {

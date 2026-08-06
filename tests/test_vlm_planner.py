@@ -29,6 +29,33 @@ from web_e2e_test_studio.domain import (
 )
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        '```json\n{"kind":"uuid","options":{}}\n```',
+        'Here is the rule: {"kind":"uuid","options":{}}',
+    ],
+)
+def test_vlm_json_parser_accepts_common_local_model_wrappers(
+    response: str,
+) -> None:
+    import web_e2e_test_studio.agent.planner as planner_module
+
+    assert planner_module._parse_json_object_response(response) == {  # noqa: SLF001
+        "kind": "uuid",
+        "options": {},
+    }
+
+
+def test_vlm_json_parser_rejects_incomplete_json() -> None:
+    import web_e2e_test_studio.agent.planner as planner_module
+
+    with pytest.raises(PlannerProtocolError, match="valid JSON"):
+        planner_module._parse_json_object_response(  # noqa: SLF001
+            '{"kind":"digits","options":'
+        )
+
+
 def test_vlm_backend_can_ignore_proxy_environment(
     monkeypatch,
 ) -> None:  # noqa: ANN001
@@ -61,9 +88,7 @@ class FakeBackend:
         self.response = response
         self.calls: list[tuple[str, str, str]] = []
 
-    def complete_json(
-        self, system_prompt: str, user_prompt: str, screenshot_path: str
-    ) -> dict:
+    def complete_json(self, system_prompt: str, user_prompt: str, screenshot_path: str) -> dict:
         self.calls.append((system_prompt, user_prompt, screenshot_path))
         return self.response
 
@@ -76,9 +101,7 @@ class SequenceBackend(FakeBackend):
         super().__init__({})
         self.responses = list(responses)
 
-    def complete_json(
-        self, system_prompt: str, user_prompt: str, screenshot_path: str
-    ) -> dict:
+    def complete_json(self, system_prompt: str, user_prompt: str, screenshot_path: str) -> dict:
         self.calls.append((system_prompt, user_prompt, screenshot_path))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -130,9 +153,7 @@ def test_vlm_planner_parses_and_reinjects_working_memory() -> None:
     assert first.memory == "Downloaded file is C:\\downloads\\devices.xlsx"
     assert "secret values may be remembered" in backend.calls[0][0]
     second_prompt = json.loads(backend.calls[1][1])
-    assert second_prompt["working_memory"] == [
-        "Downloaded file is C:\\downloads\\devices.xlsx"
-    ]
+    assert second_prompt["working_memory"] == ["Downloaded file is C:\\downloads\\devices.xlsx"]
 
 
 def test_open_remembered_link_uses_exact_url_instead_of_visual_guess() -> None:
@@ -160,10 +181,7 @@ def test_open_remembered_link_uses_exact_url_instead_of_visual_guess() -> None:
         )
     )
     planner.set_memories(
-        (
-            "bulk installation link: "
-            "https://install.example.test/bulk/contract-289886",
-        )
+        ("bulk installation link: https://install.example.test/bulk/contract-289886",)
     )
 
     plan = planner.plan(
@@ -189,15 +207,11 @@ def test_open_remembered_link_uses_exact_url_instead_of_visual_guess() -> None:
 
     action = plan.planned_actions[0].action
     assert action.name == "navigate"
-    assert action.arguments["url"] == (
-        "https://install.example.test/bulk/contract-289886"
-    )
+    assert action.arguments["url"] == ("https://install.example.test/bulk/contract-289886")
 
 
 def test_open_remembered_link_asks_when_memory_has_multiple_matches() -> None:
-    planner = StructuredVLMPlanner(
-        FakeBackend({"status": "complete", "summary": "Opened"})
-    )
+    planner = StructuredVLMPlanner(FakeBackend({"status": "complete", "summary": "Opened"}))
     planner.set_memories(
         (
             "bulk installation link for A: https://install.example.test/a",
@@ -256,9 +270,7 @@ def test_vlm_planner_parses_only_registered_structured_action() -> None:
         Observation(
             url="https://example.test",
             screenshot_path="shot.png",
-            interactive_elements=(
-                {"role": "button", "name": "Search", "test_id": "search"},
-            ),
+            interactive_elements=({"role": "button", "name": "Search", "test_id": "search"},),
         ),
         history=[],
         actions=[
@@ -464,9 +476,7 @@ def _successful_wait_feedback() -> AgentFeedback:
         ),
     )
     return AgentFeedback(
-        PlanningResult.actions(
-            (PlannedAction(action, "Wait", "Page settles"),)
-        ),
+        PlanningResult.actions((PlannedAction(action, "Wait", "Page settles"),)),
         ExecutionDump(TaskStatus.SUCCEEDED, (record,), ()),
     )
 
@@ -529,9 +539,7 @@ def test_file_extraction_goal_replans_when_model_completes_after_download() -> N
                             "name": "run_external_tool",
                             "channel": "external",
                             "tool_ref": "excel_reader",
-                            "arguments": {
-                                "args": [r"C:\downloads\devices.xlsx"]
-                            },
+                            "arguments": {"args": [r"C:\downloads\devices.xlsx"]},
                         },
                     }
                 ],
@@ -605,9 +613,7 @@ def test_download_goal_upgrades_export_click_to_managed_download() -> None:
     )
 
     assert plan.planned_actions[0].action.name == "download"
-    assert plan.planned_actions[0].action.locator == Locator(
-        "role", "button", name="Export All"
-    )
+    assert plan.planned_actions[0].action.locator == Locator("role", "button", name="Export All")
 
 
 def test_file_goal_replans_when_model_asks_for_known_download_path() -> None:
@@ -627,9 +633,7 @@ def test_file_goal_replans_when_model_asks_for_known_download_path() -> None:
                             "name": "run_external_tool",
                             "channel": "external",
                             "tool_ref": "excel_reader",
-                            "arguments": {
-                                "args": [r"C:\downloads\devices.xlsx"]
-                            },
+                            "arguments": {"args": [r"C:\downloads\devices.xlsx"]},
                         },
                     }
                 ],
@@ -677,9 +681,7 @@ def test_file_goal_keeps_download_path_across_later_wait_round() -> None:
                             "name": "run_external_tool",
                             "channel": "external",
                             "tool_ref": "excel_reader",
-                            "arguments": {
-                                "args": [r"C:\downloads\devices.xlsx"]
-                            },
+                            "arguments": {"args": [r"C:\downloads\devices.xlsx"]},
                         },
                     }
                 ],

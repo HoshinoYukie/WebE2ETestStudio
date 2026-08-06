@@ -8,7 +8,8 @@ let state = {
   agentBusy: false,
   validating: false,
   validationSteps: {},
-  polling: false
+  polling: false,
+  selectedHistory: null
 };
 
 window.addEventListener("pywebviewready", async () => {
@@ -42,8 +43,10 @@ function renderRecoverableSessions(sessions) {
   container.innerHTML = current + recoverable;
   container.querySelectorAll(".recovery-open").forEach(button => {
     button.onclick = async () => {
-      setStatus("Resuming session");
-      await api().resume_session(button.dataset.checkpoint);
+      setStatus("Opening project details");
+      const session = await api().inspect_session(button.dataset.checkpoint);
+      showHistoryDetails(session);
+      setStatus("Historical project opened · no actions started");
     };
   });
   container.querySelectorAll(".recovery-discard").forEach(button => {
@@ -54,6 +57,52 @@ function renderRecoverableSessions(sessions) {
     };
   });
 }
+
+function showHistoryDetails(session) {
+  state.selectedHistory = session;
+  $("#historyName").textContent = session.name || "Historical project";
+  $("#historyState").textContent = session.state || "unknown";
+  $("#historyRound").textContent = String(session.round ?? 0);
+  $("#historyGoal").textContent = session.goal || "—";
+  $("#historyUrl").textContent = session.last_url || "—";
+  $("#historyQuestion").textContent = session.pending_question || "—";
+  $("#historyQuestionRow").hidden = !session.pending_question;
+  $("#historyError").textContent = session.last_error || "—";
+  $("#historyErrorRow").hidden = !session.last_error;
+  $("#historyUpdated").textContent = session.updated_at || "—";
+  const steps = session.steps || [];
+  $("#historySteps").innerHTML = steps.length ? steps.map(step => `
+    <button type="button" class="history-step" data-step-id="${escapeHtml(step.id)}">
+      <span>${step.index}</span><div><strong>${escapeHtml(step.action)}</strong>
+      <small>${escapeHtml(step.intent || step.channel)}</small></div>
+    </button>`).join("") : `<div class="empty-row">No verified steps</div>`;
+  $("#historySteps").querySelectorAll(".history-step").forEach(button => {
+    button.onclick = () => openHistoricalStep(button.dataset.stepId);
+  });
+  $("#historyDialog").showModal();
+}
+
+function openHistoricalStep(stepId) {
+  const steps = state.selectedHistory?.steps || [];
+  $("#historyDialog").close();
+  renderTimeline(steps, {historical: true});
+  document.querySelector('.tabs button[data-tab="steps"]').click();
+  selectStep(stepId);
+  setStatus("Historical step opened · read-only");
+}
+
+$("#continueHistory").onclick = async () => {
+  const session = state.selectedHistory;
+  if (!session?.checkpoint_path) return;
+  $("#continueHistory").disabled = true;
+  setStatus("Resuming session");
+  try {
+    $("#historyDialog").close();
+    await api().resume_session(session.checkpoint_path);
+  } finally {
+    $("#continueHistory").disabled = false;
+  }
+};
 
 function setCommandAvailability(available) {
   state.modelAvailable = available;
@@ -115,6 +164,15 @@ async function pollEvents() {
   for (const event of events) {
     if (!["browser_preview", "validation_step"].includes(event.kind)) addAgentEvent(event);
     if (event.kind === "validation_step") applyValidationStep(event.payload);
+    if (event.kind === "historical_step_executed") {
+      const passed = event.payload?.status === "succeeded";
+      setStatus(
+        passed
+          ? `Step passed: ${event.payload.action}`
+          : `Step failed: ${event.payload?.verification?.reason || event.payload?.action || "unknown"}`,
+        !passed
+      );
+    }
     if (event.message?.startsWith("VLM run finished")) setAgentBusy(false);
     if (event.kind === "error" && event.payload?.command === "validate_export") {
       setValidationBusy(false);
@@ -179,6 +237,80 @@ function applySnapshot(snapshot) {
       <strong>${escapeHtml(s.action)} <small>· ${escapeHtml(s.channel)}</small></strong>
       <small>${escapeHtml(s.intent)}</small>
     </div></div>`).join("") : `<div class="empty-row">尚无执行步骤</div>`;
+  renderTimeline(snapshot.steps || []);
+}
+
+function renderTimeline(steps, {historical = false} = {}) {
+  $("#timeline").innerHTML = steps.length ? steps.map((step, index) => `
+    <button type="button" class="step" data-step-id="${escapeHtml(step.id)}">
+      <span class="step-index">${step.index || index + 1}</span><div>
+        <strong>${escapeHtml(step.action)} <small>· ${escapeHtml(step.channel)}</small></strong>
+        <small>${escapeHtml(step.intent || "")}</small>
+      </div>${historical ? '<span class="step-readonly">History</span>' : ""}
+    </button>`).join("") : `<div class="empty-row">No verified steps yet.</div>`;
+  $("#timeline").querySelectorAll(".step").forEach(button => {
+    button.onclick = () => selectStep(button.dataset.stepId);
+  });
+  $("#timeline").dataset.steps = JSON.stringify(steps);
+  $("#timeline").dataset.historical = String(historical);
+  $("#stepInspector").hidden = true;
+}
+
+function selectStep(stepId) {
+  const steps = JSON.parse($("#timeline").dataset.steps || "[]");
+  const step = steps.find(item => item.id === stepId);
+  if (!step) return;
+  $("#timeline").querySelectorAll(".step").forEach(item =>
+    item.classList.toggle("selected", item.dataset.stepId === stepId)
+  );
+  const selected = $("#timeline").querySelector(
+    `.step[data-step-id="${CSS.escape(stepId)}"]`
+  );
+  selected?.scrollIntoView({block: "center", behavior: "smooth"});
+  const inspector = $("#stepInspector");
+  const details = {
+    Action: `${step.channel || ""} · ${step.action || ""}`,
+    Intent: step.intent || "",
+    "Expected result": step.expected_result || "",
+    Locator: step.locator || null,
+    Arguments: step.arguments || {},
+    Verification: step.verification || null,
+    Source: step.source || ""
+  };
+  inspector.innerHTML = Object.entries(details)
+    .filter(([, value]) => value !== "" && value !== null)
+    .map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(formatEventValue(value))}</strong></div>`)
+    .join("");
+  if ($("#timeline").dataset.historical === "true") {
+    const actions = document.createElement("div");
+    actions.className = "step-inspector-actions";
+    actions.innerHTML = '<button type="button" id="runHistoricalStep">Run this step</button>';
+    inspector.appendChild(actions);
+    $("#runHistoricalStep").onclick = () => runHistoricalStep(step);
+  }
+  inspector.hidden = false;
+}
+
+async function runHistoricalStep(step) {
+  const session = state.selectedHistory;
+  if (!session?.checkpoint_path) return;
+  const needsConfirmation = ["api", "external"].includes(step.channel);
+  if (needsConfirmation && !window.confirm(
+    `This ${step.channel} step may have external side effects. Run it once?`
+  )) return;
+  const button = $("#runHistoricalStep");
+  button.disabled = true;
+  setStatus(`Preparing step: ${step.action}`);
+  try {
+    await api().run_historical_step(JSON.stringify({
+      checkpoint_path: session.checkpoint_path,
+      step_id: step.id,
+      confirmed: needsConfirmation
+    }));
+  } catch (error) {
+    setStatus(`Step could not be started: ${error}`, true);
+    button.disabled = false;
+  }
 }
 
 function renderBrowserTabs(pages) {
@@ -437,13 +569,23 @@ function applyValidationStep(step) {
   status.textContent = step.status;
 }
 
+function formatEventValue(value) {
+  if (typeof value !== "object" || value === null) return String(value);
+  try {
+    const formatted = JSON.stringify(value, null, 2);
+    return formatted.length > 4000 ? `${formatted.slice(0, 4000)}\n…` : formatted;
+  } catch (error) {
+    return `Unable to display structured value: ${error?.message || error}`;
+  }
+}
+
 function addAgentEvent(event) {
   $(".welcome")?.remove();
   const feed = $("#runPanel");
   const payload = event.payload || {};
   const rows = Object.entries(payload)
     .filter(([, value]) => value !== "" && value !== null && value !== undefined)
-    .map(([key, value]) => `<div class="event-row"><span>${escapeHtml(key.replaceAll("_", " "))}</span><strong>${escapeHtml(String(value))}</strong></div>`)
+    .map(([key, value]) => `<div class="event-row"><span>${escapeHtml(key.replaceAll("_", " "))}</span><strong>${escapeHtml(formatEventValue(value))}</strong></div>`)
     .join("");
   const legacyDetails = event.details?.length
     ? event.details.map(escapeHtml).join("\n") : "";
@@ -504,6 +646,14 @@ $("#prompt").addEventListener("keydown", e => {
 });
 document.querySelectorAll(".suggestions button").forEach(b => b.onclick = () => { $("#prompt").value = b.textContent; sendPrompt(); });
 $("#newSession").onclick = $("#startButton").onclick = () => $("#sessionDialog").showModal();
+$("#chooseOutputDir").onclick = async () => {
+  try {
+    const result = await api().choose_output_directory();
+    if (result?.path) $("#outputDir").value = result.path;
+  } catch (error) {
+    setStatus(`Directory selection failed · ${error?.message || error}`, true);
+  }
+};
 $("#modelSettings").onclick = async () => {
   applyModelSettings(await api().get_model_settings());
   $("#modelDialog").showModal();
@@ -578,6 +728,39 @@ $("#defineVariable").onclick = async () => {
     setStatus(`Variable generation failed · ${error}`, true);
   }
 };
+$("#variableSource").onchange = () => {
+  $("#variableFileRow").hidden = $("#variableSource").value !== "spreadsheet";
+};
+$("#chooseVariableFile").onclick = async () => {
+  const selected = await api().choose_spreadsheet();
+  if (selected.path) $("#variableFilePath").value = selected.path;
+};
+$("#extractVariable").onclick = async () => {
+  if (!state.running) {
+    setStatus("Start a recording session before extracting variables", true);
+    return;
+  }
+  const name = $("#variableName").value.trim();
+  const description = $("#variableExtraction").value.trim();
+  const source = $("#variableSource").value;
+  const filePath = $("#variableFilePath").value.trim();
+  if (!name || !description) {
+    setStatus("Variable name and extraction description are required", true);
+    return;
+  }
+  if (source === "spreadsheet" && !filePath) {
+    setStatus("Choose an Excel workbook before extracting", true);
+    return;
+  }
+  try {
+    setStatus(`Extracting variable ${name}`);
+    await api().extract_variable(JSON.stringify({
+      name, description, source, file_path: filePath
+    }));
+  } catch (error) {
+    setStatus(`Variable extraction failed · ${error}`, true);
+  }
+};
 $("#runTool").onclick = async () => {
   const ref = $("#toolRef").value.trim();
   if (!ref) return;
@@ -587,6 +770,60 @@ $("#runTool").onclick = async () => {
   setStatus("Running tool");
   await api().run_tool(ref, args);
 };
+const addHttpAssertion = () => {
+  const row = document.createElement("div");
+  row.className = "http-assertion";
+  row.innerHTML = `
+    <input class="assertion-path" placeholder="JSON path, e.g. data.id">
+    <select class="assertion-operator" aria-label="Assertion operator">
+      <option value="equals">equals</option>
+      <option value="not_equals">not equals</option>
+      <option value="contains">contains</option>
+      <option value="exists">exists</option>
+      <option value="not_exists">does not exist</option>
+    </select>
+    <select class="assertion-type" aria-label="Expected value type">
+      <option value="string">string</option><option value="number">number</option>
+      <option value="boolean">boolean</option><option value="null">null</option>
+      <option value="json">JSON</option>
+    </select>
+    <input class="assertion-expected" placeholder="Expected value or \${VAR:name}">
+    <button class="assertion-remove quiet" type="button" aria-label="Remove assertion">×</button>`;
+  const operator = row.querySelector(".assertion-operator");
+  const type = row.querySelector(".assertion-type");
+  const expected = row.querySelector(".assertion-expected");
+  const update = () => {
+    const noExpected = operator.value === "exists" || operator.value === "not_exists";
+    type.disabled = noExpected;
+    expected.disabled = noExpected || type.value === "null";
+    expected.placeholder = type.value === "boolean" ? "true or false" : "Expected value or \${VAR:name}";
+  };
+  operator.onchange = update;
+  type.onchange = update;
+  row.querySelector(".assertion-remove").onclick = () => row.remove();
+  $("#httpAssertions").append(row);
+  update();
+};
+const collectHttpAssertions = () => [...document.querySelectorAll(".http-assertion")].map((row, index) => {
+  const path = row.querySelector(".assertion-path").value.trim();
+  const operator = row.querySelector(".assertion-operator").value;
+  const type = row.querySelector(".assertion-type").value;
+  const raw = row.querySelector(".assertion-expected").value;
+  if (!path) throw new Error(`Assertion ${index + 1} requires a JSON path`);
+  const assertion = {path, operator};
+  if (operator === "exists" || operator === "not_exists") return assertion;
+  if (type === "string") assertion.expected = raw;
+  else if (type === "null") assertion.expected = null;
+  else if (type === "number") {
+    assertion.expected = Number(raw);
+    if (!raw.trim() || !Number.isFinite(assertion.expected)) throw new Error(`Assertion ${index + 1} requires a number`);
+  } else if (type === "boolean") {
+    if (!["true", "false"].includes(raw.trim().toLowerCase())) throw new Error(`Assertion ${index + 1} requires true or false`);
+    assertion.expected = raw.trim().toLowerCase() === "true";
+  } else assertion.expected = JSON.parse(raw);
+  return assertion;
+});
+$("#addHttpAssertion").onclick = addHttpAssertion;
 $("#sendHttpRequest").onclick = async () => {
   if (!state.running) {
     setStatus("Start a recording session before sending an API request", true);
@@ -619,7 +856,8 @@ $("#sendHttpRequest").onclick = async () => {
       url,
       headers,
       expected_status: expectedStatus,
-      timeout
+      timeout,
+      response_assertions: collectHttpAssertions()
     };
     if (bodyText) {
       if ($("#httpBodyType").value === "json") request.json = JSON.parse(bodyText);

@@ -124,6 +124,10 @@ class RunCheckpoint:
 
     @property
     def checkpoint_path(self) -> Path:
+        try:
+            self.asset_path.relative_to(self.workspace)
+        except ValueError:
+            return self.workspace / ".web-e2e" / "runs" / f"{self.id}.run.json"
         return self.asset_path.with_suffix(".run.json")
 
     def to_dict(self) -> dict[str, JsonValue]:
@@ -214,8 +218,8 @@ class RunCheckpointStore:
         self.workspace = workspace.resolve()
 
     def save(self, checkpoint: RunCheckpoint) -> Path:
-        self._require_workspace_path(checkpoint.asset_path)
         target = checkpoint.checkpoint_path
+        self._require_workspace_path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         content = json.dumps(
             checkpoint.to_dict(),
@@ -244,7 +248,10 @@ class RunCheckpointStore:
         if not isinstance(raw, dict):
             raise ValueError("Run checkpoint must contain a JSON object")
         checkpoint = RunCheckpoint.from_dict(raw)
-        self._require_workspace_path(checkpoint.asset_path)
+        if checkpoint.workspace != self.workspace:
+            raise ValueError("Run checkpoint belongs to a different workspace")
+        if checkpoint.checkpoint_path != target:
+            raise ValueError("Run checkpoint path does not match its identity")
         return checkpoint
 
     def discover(self) -> tuple[RunCheckpoint, ...]:

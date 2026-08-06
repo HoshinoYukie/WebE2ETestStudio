@@ -75,12 +75,8 @@ class PlaywrightDevice:
         self._browser_name = browser_name
         self._headless = headless
         self._viewport = viewport or {"width": 1280, "height": 720}
-        self._artifact_dir = (
-            Path(artifact_dir).resolve() if artifact_dir is not None else None
-        )
-        self._playwright_factory = (
-            playwright_factory or _default_playwright_factory
-        )
+        self._artifact_dir = Path(artifact_dir).resolve() if artifact_dir is not None else None
+        self._playwright_factory = playwright_factory or _default_playwright_factory
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._context: Any | None = None
@@ -134,9 +130,7 @@ class PlaywrightDevice:
         for page in list(getattr(self._context, "pages", ())):
             listener(page)
 
-    def add_preview_listener(
-        self, listener: Callable[[Observation, str], None]
-    ) -> None:
+    def add_preview_listener(self, listener: Callable[[Observation, str], None]) -> None:
         """Receive push-based Chromium screencast frames when supported."""
         self._preview_listeners.append(listener)
         for page in list(getattr(self._context, "pages", ())):
@@ -200,6 +194,12 @@ class PlaywrightDevice:
             ),
             ("assert_text", "Assert located text", True, ("text",)),
             ("assert_visible", "Assert a located element is visible", True, ()),
+            (
+                "extract_value",
+                "Read text, value, or an attribute from one located element",
+                True,
+                ("variable_name", "read"),
+            ),
             ("screenshot", "Capture a page or element screenshot", False, ()),
             (
                 "bind_page",
@@ -309,9 +309,7 @@ class PlaywrightDevice:
         ).to_observation()
         return self._last_observation
 
-    def capture_context(
-        self, request: ContextRequest | None = None
-    ) -> UIContext:
+    def capture_context(self, request: ContextRequest | None = None) -> UIContext:
         self._require_page()
         context = self._context_engine.capture(request)
         self._last_observation = context.to_observation()
@@ -399,9 +397,7 @@ class PlaywrightDevice:
             return
         pages = list(getattr(self._context, "pages", ()))
         candidates = [
-            page
-            for page in pages
-            if page is not closed_page and not self._page_is_closed(page)
+            page for page in pages if page is not closed_page and not self._page_is_closed(page)
         ]
         self._page = candidates[-1] if candidates else None
         self._context_engine.invalidate()
@@ -412,9 +408,7 @@ class PlaywrightDevice:
             page = self._page_refs.get(page_ref)
             if page is not None and not self._page_is_closed(page):
                 return page
-            raise ValueError(
-                f"Browser page reference is not available: {page_ref}"
-            )
+            raise ValueError(f"Browser page reference is not available: {page_ref}")
         url = str(arguments.get("url", ""))
         title = str(arguments.get("title", ""))
         opener_ref = str(arguments.get("opener_ref", ""))
@@ -428,15 +422,11 @@ class PlaywrightDevice:
             if title and title not in self._safe_page_title(page):
                 continue
             page_opener = getattr(page, "opener", None)
-            if opener is not None and (
-                not callable(page_opener) or page_opener() is not opener
-            ):
+            if opener is not None and (not callable(page_opener) or page_opener() is not opener):
                 continue
             matches.append(page)
         if len(matches) != 1:
-            raise ValueError(
-                f"Page selector matched {len(matches)} tabs; expected exactly one"
-            )
+            raise ValueError(f"Page selector matched {len(matches)} tabs; expected exactly one")
         return matches[0]
 
     def _start_screencast(self, page: Any) -> None:
@@ -472,9 +462,7 @@ class PlaywrightDevice:
         except Exception:
             return
 
-    def _write_stream_frame(
-        self, page: Any, page_id: str, encoded: str
-    ) -> None:
+    def _write_stream_frame(self, page: Any, page_id: str, encoded: str) -> None:
         if self._artifact_dir is None or page is not self._page:
             return
         target = self._publish_preview_frame(base64.b64decode(encoded))
@@ -494,9 +482,7 @@ class PlaywrightDevice:
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         with self._preview_frame_lock:
             self._preview_frame_number += 1
-            target = self._artifact_dir / (
-                f"live-preview-{self._preview_frame_number:08d}.jpg"
-            )
+            target = self._artifact_dir / (f"live-preview-{self._preview_frame_number:08d}.jpg")
             target.write_bytes(frame)
             self._preview_frame_paths.append(target)
             while len(self._preview_frame_paths) > 8:
@@ -531,9 +517,7 @@ class PlaywrightDevice:
             if control is not None:
                 control.raise_if_stopped()
             if self._last_locator_resolution is not None:
-                output["locator_resolution"] = (
-                    self._last_locator_resolution.to_dict()
-                )
+                output["locator_resolution"] = self._last_locator_resolution.to_dict()
             return ActionResult.succeeded(output)
         except Exception as exc:
             if isinstance(exc, ActionCancelledError):
@@ -570,18 +554,14 @@ class PlaywrightDevice:
             if remaining is not None:
                 remaining_ms = max(1.0, remaining * 1000)
                 requested = arguments.get("timeout")
-                if isinstance(requested, (int, float)) and not isinstance(
-                    requested, bool
-                ):
+                if isinstance(requested, (int, float)) and not isinstance(requested, bool):
                     remaining_ms = min(float(requested), remaining_ms)
                 arguments["timeout"] = remaining_ms
         if action.name == "navigate":
             url = self._required_text(arguments, "url")
             page.goto(
                 url,
-                **self._options(
-                    arguments, "wait_until", "timeout", "referer"
-                ),
+                **self._options(arguments, "wait_until", "timeout", "referer"),
             )
             return {"action": action.name, "url": url}
 
@@ -623,9 +603,7 @@ class PlaywrightDevice:
             page_ref = self._required_text(arguments, "page_ref")
             selected = self._page_refs.get(page_ref)
             if selected is None or self._page_is_closed(selected):
-                raise ValueError(
-                    f"Browser page reference is not available: {page_ref}"
-                )
+                raise ValueError(f"Browser page reference is not available: {page_ref}")
             selected.close()
             self._recover_closed_page(selected)
             return {"action": action.name, "page_ref": page_ref}
@@ -633,9 +611,7 @@ class PlaywrightDevice:
         if action.name == "open_popup":
             page_ref = self._required_text(arguments, "page_ref")
             timeout = arguments.get("timeout", 30_000)
-            if isinstance(timeout, bool) or not isinstance(
-                timeout, (int, float)
-            ):
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
                 raise ValueError("open_popup timeout must be numeric")
             target = self._resolve_locator(action.locator)
             with page.expect_popup(timeout=float(timeout)) as popup_info:
@@ -668,7 +644,31 @@ class PlaywrightDevice:
                 "path": str(path) if path is not None else "",
             }
 
-        target = self._resolve_locator(action.locator)
+        target = self._resolve_locator(
+            action.locator,
+            require_actionable=(
+                action.name in {"click", "download", "hover"}
+                and action.arguments.get("force") is not True
+            ),
+        )
+        if action.name == "extract_value":
+            read = str(arguments.get("read", "text"))
+            if read == "text":
+                value = target.inner_text()
+            elif read == "value":
+                value = target.input_value()
+            elif read == "attribute":
+                attribute = self._required_text(arguments, "attribute")
+                value = target.get_attribute(attribute)
+                if value is None:
+                    raise ValueError(f"Located element has no {attribute!r} attribute")
+            else:
+                raise ValueError(f"Unsupported extraction read mode: {read}")
+            return {
+                "action": action.name,
+                "variable_name": self._required_text(arguments, "variable_name"),
+                "value": str(value),
+            }
         if action.name == "click":
             target.click(
                 **self._options(
@@ -685,9 +685,7 @@ class PlaywrightDevice:
             )
         elif action.name == "download":
             timeout = arguments.get("timeout", 30_000)
-            if isinstance(timeout, bool) or not isinstance(
-                timeout, (int, float)
-            ):
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
                 raise ValueError("download timeout must be numeric")
             with page.expect_download(timeout=float(timeout)) as download_info:
                 if control is None:
@@ -696,9 +694,7 @@ class PlaywrightDevice:
                     target.click(timeout=float(timeout))
             download = download_info.value
             requested_path = arguments.get("path")
-            if requested_path is not None and not isinstance(
-                requested_path, str
-            ):
+            if requested_path is not None and not isinstance(requested_path, str):
                 raise ValueError("download path must be a string")
             download_root = (
                 self._artifact_dir.parent / "downloads"
@@ -725,17 +721,13 @@ class PlaywrightDevice:
             text = self._required_text(arguments, "text", fallback="value")
             target.fill(
                 text,
-                **self._options(
-                    arguments, "force", "no_wait_after", "timeout"
-                ),
+                **self._options(arguments, "force", "no_wait_after", "timeout"),
             )
         elif action.name == "press":
             key = self._required_text(arguments, "key")
             target.press(
                 key,
-                **self._options(
-                    arguments, "delay", "no_wait_after", "timeout"
-                ),
+                **self._options(arguments, "delay", "no_wait_after", "timeout"),
             )
         elif action.name == "select":
             option: dict[str, Any]
@@ -749,16 +741,10 @@ class PlaywrightDevice:
                 option = {"value": self._required_text(arguments, "value")}
             target.select_option(
                 **option,
-                **self._options(
-                    arguments, "force", "no_wait_after", "timeout"
-                ),
+                **self._options(arguments, "force", "no_wait_after", "timeout"),
             )
         elif action.name == "check":
-            method = (
-                target.check
-                if bool(arguments.get("checked", True))
-                else target.uncheck
-            )
+            method = target.check if bool(arguments.get("checked", True)) else target.uncheck
             method(
                 **self._options(
                     arguments,
@@ -781,21 +767,13 @@ class PlaywrightDevice:
                 )
             )
         elif action.name == "assert_text":
-            expected = self._required_text(
-                arguments, "text", fallback="expected"
-            )
-            actual = str(
-                target.inner_text(
-                    **self._options(arguments, "timeout")
-                )
-            )
+            expected = self._required_text(arguments, "text", fallback="expected")
+            actual = str(target.inner_text(**self._options(arguments, "timeout")))
             exact = bool(arguments.get("exact", False))
             matches = actual == expected if exact else expected in actual
             if not matches:
                 comparison = "equal" if exact else "contain"
-                raise AssertionError(
-                    f"Expected text to {comparison} {expected!r}; got {actual!r}"
-                )
+                raise AssertionError(f"Expected text to {comparison} {expected!r}; got {actual!r}")
             return {"action": action.name, "actual_text": actual}
         elif action.name == "assert_visible":
             if not bool(target.is_visible()):
@@ -804,7 +782,12 @@ class PlaywrightDevice:
             raise ValueError(f"Unsupported browser action: {action.name}")
         return {"action": action.name}
 
-    def _resolve_locator(self, locator: Locator | None) -> Any:
+    def _resolve_locator(
+        self,
+        locator: Locator | None,
+        *,
+        require_actionable: bool = False,
+    ) -> Any:
         if locator is None:
             raise ValueError("This browser action requires a locator")
         targets: dict[Locator, Any] = {}
@@ -817,10 +800,17 @@ class PlaywrightDevice:
             targets[candidate] = target
             is_visible = getattr(target, "is_visible", None)
             is_enabled = getattr(target, "is_enabled", None)
+            actionable = True
+            if require_actionable and _is_playwright_locator(target):
+                try:
+                    target.click(trial=True, timeout=1_500)
+                except Exception:
+                    actionable = False
             return LocatorProbe(
                 count=count,
                 visible=bool(is_visible()) if callable(is_visible) else True,
                 enabled=bool(is_enabled()) if callable(is_enabled) else True,
+                actionable=actionable,
             )
 
         resolution = self._locator_engine.resolve(
@@ -843,9 +833,7 @@ class PlaywrightDevice:
         if locator.strategy == "label":
             return page.get_by_label(locator.value, exact=locator.exact)
         if locator.strategy == "placeholder":
-            return page.get_by_placeholder(
-                locator.value, exact=locator.exact
-            )
+            return page.get_by_placeholder(locator.value, exact=locator.exact)
         if locator.strategy == "text":
             return page.get_by_text(locator.value, exact=locator.exact)
         if locator.strategy == "css":
@@ -886,9 +874,7 @@ class PlaywrightDevice:
         return str(value)
 
     @staticmethod
-    def _options(
-        arguments: dict[str, JsonValue], *names: str
-    ) -> dict[str, JsonValue]:
+    def _options(arguments: dict[str, JsonValue], *names: str) -> dict[str, JsonValue]:
         return {
             name: arguments[name]
             for name in names
@@ -904,6 +890,11 @@ class PlaywrightDevice:
         except ImportError:
             return False
         return isinstance(error, PlaywrightTimeout)
+
+
+def _is_playwright_locator(target: Any) -> bool:
+    module = str(getattr(target.__class__, "__module__", ""))
+    return module.startswith("playwright.")
 
 
 __all__ = ["PlaywrightDevice"]

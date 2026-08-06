@@ -6,7 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from web_e2e_test_studio.agent import ActionRegistry, ActionSpec
+from web_e2e_test_studio.agent import ActionRegistry, ActionSpec, PlanningResult, RunStatus
 from web_e2e_test_studio.desktop.engine import (
     DesktopRecordingConfig,
     DesktopRecordingEngine,
@@ -89,6 +89,37 @@ class FakeRecorder:
         return drained
 
 
+class _CompletePlanner:
+    def plan(self, request, observation, history, actions):  # noqa: ANN001, ANN201
+        return PlanningResult.complete(f"Already at {observation.url}")
+
+
+def test_desktop_engine_runs_persisted_step_without_duplicating_it(
+    tmp_path: Path,
+) -> None:
+    config = DesktopRecordingConfig(
+        url="https://example.test/start",
+        goal="Replay one step",
+        name="single_step",
+        asset_path=tmp_path / "single_step.json",
+        output_path=tmp_path / "test_single_step.py",
+        workspace=tmp_path,
+    )
+    device = FakeDevice()
+    engine = DesktopRecordingEngine(config, device=device, recorder=FakeRecorder())
+    snapshot = engine.start()
+    original_id = snapshot.steps[0].id
+
+    result, replayed = engine.run_recorded_step(original_id)
+
+    assert result["status"] == "succeeded"
+    assert result["verification"]["status"] == "verified"
+    assert replayed.step_count == 1
+    persisted = json.loads(config.asset_path.read_text(encoding="utf-8"))
+    assert [step["id"] for step in persisted["steps"]] == [original_id]
+    assert persisted["execution_history"][-1]["kind"] == "historical_step_execution"
+
+
 def test_desktop_engine_records_manual_actions_and_exports_pytest(
     tmp_path: Path,
 ) -> None:
@@ -131,6 +162,46 @@ def test_desktop_engine_records_manual_actions_and_exports_pytest(
     assert "def test_desktop_flow" in exported
     assert "openai" not in exported.lower()
     assert device.closed is True
+
+
+def test_run_ai_syncs_pending_manual_navigation_before_accepting_complete(
+    tmp_path: Path,
+) -> None:
+    device = FakeDevice()
+    recorder = FakeRecorder()
+    config = DesktopRecordingConfig(
+        url="",
+        goal="Open sign in",
+        name="manual_before_agent",
+        asset_path=tmp_path / "manual_before_agent.json",
+        output_path=tmp_path / "test_manual_before_agent.py",
+        workspace=tmp_path,
+    )
+    engine = DesktopRecordingEngine(
+        config,
+        device=device,
+        recorder=recorder,
+        planner_factory=_CompletePlanner,
+    )
+    engine.start()
+    target = "https://example.test/sign-in"
+    engine.execute(Action("navigate", ActionChannel.BROWSER, arguments={"url": target}))
+    recorder.pending.append(
+        Action("navigate", ActionChannel.BROWSER, arguments={"url": target})
+    )
+
+    result, snapshot = engine.run_ai("Open the sign-in page")
+
+    assert result.status is RunStatus.COMPLETED
+    assert len(result.steps) == 1
+    done = next(event for event in result.events if event.kind == "done")
+    assert done.payload["verified_steps"] == 1
+    assert snapshot.step_count == 1
+    assert snapshot.steps[0].action.name == "navigate"
+    assert snapshot.steps[0].action.arguments["url"] == target
+    assert "page.goto('https://example.test/sign-in')" in config.output_path.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_desktop_engine_can_start_without_a_browser_for_api_or_tool_tasks(
@@ -423,3 +494,68 @@ def test_desktop_engine_executes_generated_api_value_but_records_reference(
     exported = config.output_path.read_text(encoding="utf-8")
     assert "VARIABLES['order_id']" in exported
     assert preview not in exported
+
+
+def test_desktop_engine_extracts_page_value_and_exports_runtime_capture(
+    tmp_path: Path,
+) -> None:
+    class _ExtractionDevice(FakeDevice):
+        def execute(self, action: Action) -> ActionResult:
+            self.executed.append(action)
+            if action.name == "extract_value":
+                return ActionResult.succeeded(
+                    {
+                        "variable_name": action.arguments["variable_name"],
+                        "value": "ORD-42",
+                    }
+                )
+            return ActionResult.succeeded({"action": action.name})
+
+        @staticmethod
+        def action_specs() -> tuple[ActionSpec, ...]:
+            return FakeDevice.action_specs() + (
+                ActionSpec(
+                    "extract_value",
+                    ActionChannel.BROWSER,
+                    "Extract value",
+                    locator_required=True,
+                    required_arguments=("variable_name", "read"),
+                ),
+            )
+
+    config = DesktopRecordingConfig(
+        url="",
+        goal="Capture order ID",
+        name="capture_page_value",
+        asset_path=tmp_path / "capture.json",
+        output_path=tmp_path / "test_capture.py",
+        workspace=tmp_path,
+    )
+    engine = DesktopRecordingEngine(
+        config,
+        device=_ExtractionDevice(),
+        recorder=FakeRecorder(),
+        variable_extraction_compiler=lambda name, description, source, context, path: (
+            VariableDefinition(
+                name,
+                description,
+                "page_value",
+                {
+                    "source": source,
+                    "locator": {"strategy": "css", "value": "#order-id"},
+                    "read": "text",
+                    "attribute": "",
+                },
+            )
+        ),
+    )
+    engine.start()
+
+    definition, value, snapshot = engine.extract_variable("order_id", "Read the order ID", "page")
+
+    assert definition.kind == "page_value"
+    assert value == "ORD-42"
+    assert snapshot.variables[0]["reference"] == "${VAR:order_id}"
+    exported = config.output_path.read_text(encoding="utf-8")
+    assert "VARIABLES['order_id'] = page.locator('#order-id').inner_text()" in exported
+    assert "ORD-42" not in exported

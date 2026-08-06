@@ -73,6 +73,7 @@
           </div>
           <div class="tab-panel" id="stepsPanel">
             <div class="timeline" id="timeline"><div class="empty-row">No verified steps yet.</div></div>
+            <div class="step-inspector" id="stepInspector" hidden></div>
             <div class="artifacts">
               <div class="artifact" id="assetArtifact"><span>JSON</span><div><strong>Test asset</strong><small>Not generated</small></div></div>
               <div class="artifact" id="pytestArtifact"><span>PY</span><div><strong>Plain PyTest</strong><small>Not generated</small></div></div>
@@ -86,6 +87,21 @@
                 placeholder="Format, e.g. ORD- prefix followed by 8 digits"></textarea>
               <button class="wide" id="defineVariable">Generate variable</button>
               <small>Reference with ${VAR:order_id} in API fields or Agent messages. Exported PyTest regenerates used variables on every run.</small>
+              <div class="variable-extraction">
+                <label>Extract a value with AI</label>
+                <select id="variableSource">
+                  <option value="page">Current browser page</option>
+                  <option value="spreadsheet">Excel workbook</option>
+                </select>
+                <textarea id="variableExtraction" rows="2" spellcheck="false"
+                  placeholder="Describe the value to find and store"></textarea>
+                <div class="path-picker" id="variableFileRow" hidden>
+                  <input id="variableFilePath" placeholder="Excel file path (.xlsx or .xlsm)">
+                  <button class="quiet" id="chooseVariableFile">Choose…</button>
+                </div>
+                <button class="wide" id="extractVariable">Extract and store</button>
+                <small>The AI creates a deterministic extraction rule. Exported PyTest reads the page or workbook again at runtime.</small>
+              </div>
               <div class="variable-list" id="variableList"></div>
             </div>
             <div class="tool-box">
@@ -106,6 +122,13 @@
                 <label>Body<select id="httpBodyType"><option value="json">JSON</option><option value="raw">Raw text</option></select></label>
                 <label>Expected status<input id="httpExpectedStatus" type="number" value="200" min="100" max="599"></label>
                 <label>Timeout (seconds)<input id="httpTimeout" type="number" value="30" min="0.1" step="0.1"></label>
+              </div>
+              <div class="response-assertions">
+                <div class="response-assertions-head">
+                  <div><strong>Response assertions</strong><small>JSON path examples: data.id, items.0.status</small></div>
+                  <button class="quiet" type="button" id="addHttpAssertion">Add assertion</button>
+                </div>
+                <div id="httpAssertions"></div>
               </div>
               <small class="api-security-note">Headers, URL and body support ${VAR:name}. They are recorded as references, not current generated values.</small>
               <button class="wide primary" id="sendHttpRequest">Send and record</button>
@@ -170,7 +193,12 @@
       <label>Test name<input name="name" value="recorded_flow" required></label>
       <label>Goal<textarea name="goal" required>验证关键业务流程</textarea></label>
       <label>Initial browser URL <small>(optional for API/tool-only tasks)</small><input name="url" placeholder="https://example.com"></label>
-      <label>Output directory<input name="output_dir" id="outputDir" required></label>
+      <label>Output directory
+        <div class="path-picker">
+          <input name="output_dir" id="outputDir" required>
+          <button type="button" class="quiet" id="chooseOutputDir">Choose…</button>
+        </div>
+      </label>
       <label class="checkbox"><input type="checkbox" name="headless"> Run browser headless</label>
       <div class="dialog-actions"><button value="cancel" class="quiet">Cancel</button><button value="start" class="primary">Start Agent</button></div>
     </form>
@@ -186,6 +214,32 @@
       <label class="checkbox"><input type="checkbox" name="clear_api_key"> Remove the current API key</label>
       <p class="security-note">API Key 仅写入当前 Desktop 进程内存，不会进入测试资产或导出的 PyTest。</p>
       <div class="dialog-actions"><button type="button" id="checkModel" class="quiet">Check connection</button><button value="cancel" class="quiet">Cancel</button><button value="save" class="primary">Save and verify</button></div>
+    </form>
+  </dialog>
+  <dialog id="historyDialog">
+    <form method="dialog">
+      <div class="dialog-head">
+        <div><small>HISTORICAL PROJECT</small><h2 id="historyName">Project</h2></div>
+        <button value="cancel">×</button>
+      </div>
+      <p class="history-readonly">Viewing is read-only. No browser, API, or tool action has started.</p>
+      <div class="history-details">
+        <div><span>Status</span><strong id="historyState">—</strong></div>
+        <div><span>Round</span><strong id="historyRound">0</strong></div>
+        <div><span>Goal</span><strong id="historyGoal">—</strong></div>
+        <div><span>Last page</span><strong id="historyUrl">—</strong></div>
+        <div id="historyQuestionRow"><span>Pending question</span><strong id="historyQuestion">—</strong></div>
+        <div id="historyErrorRow"><span>Last error</span><strong id="historyError">—</strong></div>
+        <div><span>Updated</span><strong id="historyUpdated">—</strong></div>
+      </div>
+      <div class="history-step-section">
+        <div class="section-label">Verified steps</div>
+        <div class="history-step-list" id="historySteps"></div>
+      </div>
+      <div class="dialog-actions">
+        <button value="cancel" class="quiet">Close</button>
+        <button type="button" class="primary" id="continueHistory">Continue recording</button>
+      </div>
     </form>
   </dialog>
   <script src="app.js"></script>
