@@ -1,0 +1,70 @@
+#environmentDialog {
+  width: min(760px, calc(100vw - 40px));
+}
+
+.environment-dialog-body {
+  padding: 22px;
+}
+
+.environment-section {
+  margin: 18px 0;
+}
+
+.environment-list {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 12px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.environment-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.environment-item > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.environment-item small {
+  overflow-wrap: anywhere;
+}
+
+.environment-item > span {
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.environment-item.ready > span {
+  color: var(--ok);
+}
+
+.environment-item.missing > span,
+.environment-item.error > span {
+  color: var(--danger);
+}
+
+.environment-empty {
+  color: var(--muted);
+  padding: 10px 0;
+}
+
+.environment-variable-form {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.environment-variable-form label {
+  margin: 0;
+}

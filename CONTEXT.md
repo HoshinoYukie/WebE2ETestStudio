@@ -61,3 +61,10 @@ configuration, and lifecycle state.
 **Exported Test**  
 A plain pytest + Playwright file compiled from a `TestAsset`. It must not import
 the Studio, Agent, OpenAI, or any model runtime.
+
+**Markdown Workflow**
+A use-case-owned `*.workflow.md` specification for one large business path. It
+contains authoring sample data, ordered stages, and explanatory source
+knowledge. Studio compiles it into an Authoring Run and exports a standalone
+Python test with portable `${INPUT:path}` bindings. Production never runs or
+rewrites the Markdown.

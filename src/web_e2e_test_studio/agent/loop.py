@@ -106,6 +106,7 @@ class AuthoringAgent:
         max_rounds: int = 12,
         event_sink: Callable[[AgentEvent], None] | None = None,
         cancellation: CancellationToken | None = None,
+        inputs: dict[str, JsonValue] | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -117,6 +118,7 @@ class AuthoringAgent:
         self._event_sink = event_sink
         self._compiler = PlanCompiler(actions)
         self._cancellation = cancellation or CancellationToken()
+        self._inputs = inputs or {}
 
     def perform(
         self,
@@ -177,6 +179,7 @@ class AuthoringAgent:
             actions=self._actions,
             record_sink=record_execution,
             cancellation=self._cancellation,
+            inputs=self._inputs,
         )
 
         for round_number in range(1, self._max_rounds + 1):

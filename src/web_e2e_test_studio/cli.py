@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from web_e2e_test_studio.domain import JsonValue
 from web_e2e_test_studio.exporters import PytestExporter
 from web_e2e_test_studio.storage import JsonAssetStore
+from web_e2e_test_studio.workflow_spec import MarkdownWorkflowSpec
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,6 +71,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     record.add_argument("--headless", action="store_true")
     record.set_defaults(handler=_record_command)
+
+    workflow = subcommands.add_parser(
+        "workflow", help="Compile, update, or execute a Markdown workflow"
+    )
+    workflow_commands = workflow.add_subparsers(
+        dest="workflow_command", required=True
+    )
+    compile_workflow = workflow_commands.add_parser(
+        "compile", help="Resolve a workflow and print the Agent instruction"
+    )
+    compile_workflow.add_argument("source", type=Path)
+    compile_workflow.set_defaults(handler=_compile_workflow_command)
+    update_workflow = workflow_commands.add_parser(
+        "update", help="Update values in the workflow data block"
+    )
+    update_workflow.add_argument("source", type=Path)
+    update_workflow.add_argument(
+        "--set", action="append", default=[], metavar="KEY=VALUE", required=True
+    )
+    update_workflow.set_defaults(handler=_update_workflow_command)
+    run_workflow = workflow_commands.add_parser(
+        "run", help="Execute a Markdown workflow with Playwright and export pytest"
+    )
+    run_workflow.add_argument("source", type=Path)
+    run_workflow.add_argument("--output-dir", type=Path, default=Path("recordings"))
+    run_workflow.add_argument("--headless", action="store_true")
+    run_workflow.set_defaults(handler=_run_workflow_command)
     return parser
 
 
@@ -129,6 +159,47 @@ def _record_command(arguments: argparse.Namespace) -> int:
         tools=arguments.tool,
         headless=bool(arguments.headless),
     )
+
+
+def _compile_workflow_command(arguments: argparse.Namespace) -> int:
+    compiled = MarkdownWorkflowSpec.load(arguments.source).compile()
+    print(compiled.sanitized_instruction())
+    if compiled.memories:
+        print("\nBusiness knowledge:")
+        for memory in compiled.memories:
+            print(f"- {memory}")
+    return 0
+
+
+def _update_workflow_command(arguments: argparse.Namespace) -> int:
+    updates: dict[str, JsonValue] = {}
+    for assignment in arguments.set:
+        key, separator, raw_value = assignment.partition("=")
+        if not separator or not key.strip():
+            raise ValueError("Workflow updates must use KEY=VALUE")
+        try:
+            value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            value = raw_value
+        updates[key.strip()] = value
+    spec = MarkdownWorkflowSpec.load(arguments.source).with_data(updates)
+    destination = spec.save(arguments.source)
+    print(f"Updated workflow data: {destination}")
+    return 0
+
+
+def _run_workflow_command(arguments: argparse.Namespace) -> int:
+    from web_e2e_test_studio.workflow_runner import run_markdown_workflow
+
+    result = run_markdown_workflow(
+        arguments.source,
+        output_dir=arguments.output_dir,
+        headless=bool(arguments.headless),
+    )
+    print(f"Workflow status: {result.status.value}")
+    print(f"Test asset: {result.asset_path}")
+    print(f"Plain pytest: {result.output_path}")
+    return 0 if result.completed else 1
 
 
 if __name__ == "__main__":

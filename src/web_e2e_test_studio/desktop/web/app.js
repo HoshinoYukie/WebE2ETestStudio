@@ -19,10 +19,81 @@ window.addEventListener("pywebviewready", async () => {
   $("#projectName").textContent = boot.workspace.split(/[\\/]/).pop() || "Workspace";
   $("#outputDir").value = `${boot.workspace}\\recordings`;
   applyModelSettings(boot.model);
+  renderEnvironment(
+    boot.environment || {ready: false, checks: []},
+    boot.environment_settings || {variables: []}
+  );
   renderRecoverableSessions(boot.recoverable_sessions || []);
+  renderWorkflows(boot.workflows || []);
   setInterval(pollEvents, 250);
   await checkModel();
 });
+
+function renderWorkflows(workflows) {
+  const select = $("#workflowPath");
+  select.innerHTML = `<option value="">Choose a *.workflow.md template</option>` +
+    workflows.map(workflow => `<option value="${escapeHtml(workflow.path)}">${escapeHtml(workflow.name || workflow.path)}</option>`).join("");
+}
+
+$("#loadWorkflow").onclick = async () => {
+  const path = $("#workflowPath").value;
+  if (!path) return setStatus("Choose a Markdown workflow", true);
+  try {
+    const document = await api().load_workflow(path);
+    $("#workflowData").value = JSON.stringify(document.data, null, 2);
+    setStatus(`Loaded workflow · ${document.name}`);
+  } catch (error) {
+    setStatus(`Workflow load failed · ${error}`, true);
+  }
+};
+
+$("#saveWorkflowData").onclick = async () => {
+  const path = $("#workflowPath").value;
+  if (!path) return setStatus("Choose a Markdown workflow", true);
+  try {
+    const data = JSON.parse($("#workflowData").value);
+    if (!data || Array.isArray(data) || typeof data !== "object") {
+      throw new Error("Workflow data must be a JSON object");
+    }
+    const document = await api().update_workflow_data(JSON.stringify({path, data}));
+    $("#workflowData").value = JSON.stringify(document.data, null, 2);
+    setStatus(`Saved workflow data · ${document.name}`);
+  } catch (error) {
+    setStatus(`Workflow save failed · ${error}`, true);
+  }
+};
+
+$("#previewWorkflow").onclick = async () => {
+  const path = $("#workflowPath").value;
+  if (!path) return setStatus("Choose a Markdown workflow", true);
+  try {
+    const compiled = await api().compile_workflow(path);
+    addAgentEvent({
+      kind: "workflow_preview",
+      message: `Workflow ready · ${compiled.steps.length} business stages`,
+      payload: {goal: compiled.goal, stages: compiled.steps}
+    });
+    setStatus(`Workflow valid · ${compiled.steps.length} stages`);
+  } catch (error) {
+    setStatus(`Workflow validation failed · ${error}`, true);
+  }
+};
+
+$("#runWorkflow").onclick = async () => {
+  const path = $("#workflowPath").value;
+  if (!path) return setStatus("Choose a Markdown workflow", true);
+  try {
+    const result = await api().run_workflow(JSON.stringify({
+      path,
+      output_dir: `${state.workspace}\\recordings`,
+      headless: false
+    }));
+    if (!result?.accepted) throw new Error("Workflow was not accepted");
+    setStatus("Markdown workflow running with Playwright");
+  } catch (error) {
+    setStatus(`Workflow start failed · ${error}`, true);
+  }
+};
 
 function renderRecoverableSessions(sessions) {
   const container = $("#sessions");
@@ -154,6 +225,30 @@ function applyModelSettings(settings) {
   form.elements.api_key.value = "";
   form.elements.clear_api_key.checked = false;
   form.elements.ignore_proxy.checked = Boolean(settings.ignore_proxy);
+}
+
+function renderEnvironment(report, settings) {
+  const checks = report?.checks || [];
+  $("#environmentChecks").innerHTML = checks.length
+    ? checks.map(check => `
+      <div class="environment-item ${escapeHtml(check.status)}">
+        <div><strong>${escapeHtml(check.label)}</strong><small>${escapeHtml(check.message)}</small></div>
+        <span>${escapeHtml(check.status)}</span>
+      </div>`).join("")
+    : `<div class="environment-empty">No runtime issues detected</div>`;
+  $("#installChromium").hidden = !checks.some(
+    check => check.id === "chromium" && check.repairable && check.status !== "ready"
+  );
+
+  const variables = settings?.variables || [];
+  $("#environmentPath").textContent = settings?.path || "";
+  $("#environmentVariables").innerHTML = variables.length
+    ? variables.map(variable => `
+      <div class="environment-item variable">
+        <div><strong>${escapeHtml(variable.name)}</strong><small>${variable.masked ? "Configured (hidden)" : escapeHtml(variable.value)} · ${escapeHtml(variable.source)}</small></div>
+        <button type="button" class="quiet environment-remove" data-name="${escapeHtml(variable.name)}">Remove</button>
+      </div>`).join("")
+    : `<div class="environment-empty">No persisted variables</div>`;
 }
 
 async function pollEvents() {
@@ -654,6 +749,65 @@ $("#chooseOutputDir").onclick = async () => {
     setStatus(`Directory selection failed · ${error?.message || error}`, true);
   }
 };
+$("#environmentSettings").onclick = async () => {
+  try {
+    const [report, settings] = await Promise.all([
+      api().check_environment(),
+      api().get_environment_settings()
+    ]);
+    renderEnvironment(report, settings);
+    $("#environmentDialog").showModal();
+  } catch (error) {
+    setStatus(`Environment check failed · ${error?.message || error}`, true);
+  }
+};
+$("#closeEnvironment").onclick = $("#doneEnvironment").onclick = () => $("#environmentDialog").close();
+$("#installChromium").onclick = async () => {
+  const button = $("#installChromium");
+  button.disabled = true;
+  setStatus("Installing Playwright Chromium");
+  try {
+    const result = await api().install_environment_component("chromium");
+    renderEnvironment(result.environment, await api().get_environment_settings());
+    setStatus("Playwright Chromium installed");
+  } catch (error) {
+    setStatus(`Chromium installation failed · ${error?.message || error}`, true);
+  } finally {
+    button.disabled = false;
+  }
+};
+$("#environmentVariableForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.target;
+  try {
+    const data = Object.fromEntries(new FormData(form));
+    const settings = await api().configure_environment_variable({
+      name: data.variable_name,
+      value: data.value
+    });
+    renderEnvironment(await api().check_environment(), settings);
+    applyModelSettings(await api().get_model_settings());
+    form.reset();
+    setStatus("Environment variable saved");
+  } catch (error) {
+    setStatus(`Environment variable failed · ${error?.message || error}`, true);
+  }
+});
+$("#environmentVariables").addEventListener("click", async event => {
+  const button = event.target.closest(".environment-remove");
+  if (!button) return;
+  try {
+    const settings = await api().configure_environment_variable({
+      name: button.dataset.name,
+      remove: true
+    });
+    renderEnvironment(await api().check_environment(), settings);
+    applyModelSettings(await api().get_model_settings());
+    setStatus(`Removed ${button.dataset.name}`);
+  } catch (error) {
+    setStatus(`Environment variable removal failed · ${error?.message || error}`, true);
+  }
+});
 $("#modelSettings").onclick = async () => {
   applyModelSettings(await api().get_model_settings());
   $("#modelDialog").showModal();

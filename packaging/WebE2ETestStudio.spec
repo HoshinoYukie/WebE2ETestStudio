@@ -10,13 +10,16 @@ source_root = project_root / "src"
 web_root = source_root / "web_e2e_test_studio" / "desktop" / "web"
 
 webview_data, webview_binaries, webview_hidden = collect_all("webview")
+playwright_data, playwright_binaries, playwright_hidden = collect_all("playwright")
 datas = [
     *webview_data,
+    *playwright_data,
     (str(web_root), "web_e2e_test_studio/desktop/web"),
 ]
-binaries = list(webview_binaries)
+binaries = [*webview_binaries, *playwright_binaries]
 hiddenimports = [
     *webview_hidden,
+    *playwright_hidden,
     *collect_submodules("playwright"),
 ]
 

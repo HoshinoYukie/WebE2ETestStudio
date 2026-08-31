@@ -310,8 +310,10 @@ def _system_prompt(actions: Sequence[ActionSpec]) -> str:
         "Return a short ordered list of registered actions, ask one blocking "
         "question, or declare the requested goal complete. Never emit Python, "
         "JavaScript, shell commands, hidden selectors, or an unregistered action. "
-        "For browser actions, select an element_id from observation.interactive_elements. "
-        "Do not invent a locator when an indexed element is available. Return one JSON "
+        "For browser actions whose registered specification has locator_required=true, "
+        "select an element_id from observation.interactive_elements. Omit element_id or "
+        "set it to null for actions that do not target a page element. Do not invent a "
+        "locator when an indexed element is available. Return one JSON "
         "object matching one of:\n"
         '{"status":"actions","thought":"...","confidence":0.0,"actions":['
         '{"intent":"...","expected_result":"...","action":'
@@ -822,7 +824,8 @@ def _parse_action(
 
     raw_locator = raw_action.get("locator")
     locator = Locator.from_dict(raw_locator) if isinstance(raw_locator, dict) else None
-    element_id = str(raw_action.get("element_id", "")).strip()
+    raw_element_id = raw_action.get("element_id")
+    element_id = str(raw_element_id).strip() if raw_element_id is not None else ""
     target = _target_from_element_id(element_id, elements) if element_id else None
     raw_arguments = raw_action.get("arguments", {})
     if not isinstance(raw_arguments, dict):

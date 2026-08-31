@@ -19,6 +19,23 @@ from web_e2e_test_studio.domain import (
 
 _ENV_REFERENCE = re.compile(r"\$\{ENV:([A-Za-z_][A-Za-z0-9_]*)\}")
 _VARIABLE_REFERENCE = re.compile(r"\$\{VAR:([A-Za-z_][A-Za-z0-9_]*)\}")
+_INPUT_REFERENCE = re.compile(r"\$\{INPUT:([A-Za-z_][A-Za-z0-9_.-]*)\}")
+
+_INPUT_HELPER = '''def _input_value(path: str) -> object:
+    current: object = INPUTS
+    for segment in path.split("."):
+        if isinstance(current, dict) and segment in current:
+            current = current[segment]
+        elif isinstance(current, list) and segment.isdigit() and int(segment) < len(current):
+            current = current[int(segment)]
+        else:
+            raise KeyError(f"Required runtime input is missing: {path}")
+    return current
+
+
+with Path(os.environ["WEB_E2E_INPUT_PATH"]).open(encoding="utf-8") as _input_file:
+    INPUTS = json.load(_input_file)
+assert isinstance(INPUTS, dict), "Runtime input JSON must contain an object"'''
 
 _HTTP_HELPER = """_JSON_MISSING = object()
 
@@ -263,6 +280,11 @@ class PytestExporter:
         has_spreadsheet_steps = any(
             step.action.name == "extract_spreadsheet" for step in asset.steps
         )
+        has_output_steps = any(
+            step.action.name in {"extract_value", "extract_spreadsheet"}
+            and bool(step.action.arguments.get("variable_name"))
+            for step in asset.steps
+        )
         has_portable_tools = any(
             step.action.channel == ActionChannel.EXTERNAL
             and step.action.tool_ref is not None
@@ -273,12 +295,21 @@ class PytestExporter:
         has_environment_references = any(
             _contains_environment_reference(step.action.arguments) for step in asset.steps
         )
+        has_input_references = any(
+            _contains_input_reference(step.action.arguments)
+            or _locator_contains_input_reference(step.action.locator)
+            for step in asset.steps
+        )
         imports: list[str] = []
         if asset.steps:
             imports.append("from contextlib import contextmanager")
             imports.append("from collections.abc import Iterator")
+        if has_api_steps or has_input_references or has_output_steps:
+            imports.append("import json")
         if has_api_steps:
-            imports.extend(["import json", "import urllib.error", "import urllib.request"])
+            imports.extend(["import urllib.error", "import urllib.request"])
+        if has_input_references:
+            imports.extend(["import os", "from pathlib import Path"])
         if has_external_steps:
             imports.extend(["import os", "import subprocess"])
         elif has_environment_references:
@@ -342,6 +373,8 @@ class PytestExporter:
             )
         if variable_definitions:
             sections.append(_render_generated_variables(variable_definitions))
+        if has_input_references:
+            sections.append(_INPUT_HELPER)
         if has_api_steps:
             sections.append(_HTTP_HELPER)
         if has_download_steps:
@@ -408,7 +441,8 @@ class PytestExporter:
                         f"assert len({result_name}) == 1, "
                         f"'Variable extraction requires exactly one value'\n"
                         f"VARIABLES[{variable_name!r}] = "
-                        f"{result_name}[0]['value']"
+                        f"{result_name}[0]['value']\n"
+                        f"{_output_statement(variable_name)}"
                     )
                 return f"_extract_spreadsheet({file_path!r}, {query!r}, {sheet!r})"
             return self._render_external_action(asset, action)
@@ -463,7 +497,10 @@ class PytestExporter:
                 expression = f"{target}.get_attribute({attribute!r}, {operation_options})"
             else:
                 raise ValueError(f"Unsupported extraction read mode: {read}")
-            return f"VARIABLES[{variable_name!r}] = {expression}"
+            return (
+                f"VARIABLES[{variable_name!r}] = {expression}\n"
+                f"{_output_statement(variable_name)}"
+            )
         if name == "click":
             return f"{target}.click({operation_options})"
         if name == "download":
@@ -505,7 +542,10 @@ class PytestExporter:
             if timeout is None and action.timeout_seconds is not None:
                 timeout = action.timeout_seconds * 1000
             suffix = f", timeout={_number_literal(timeout)}" if timeout is not None else ""
-            return f"expect({target}).to_contain_text({expected!r}{suffix})"
+            return (
+                f"expect({target}).to_contain_text("
+                f"{_string_expression(expected)}{suffix})"
+            )
         if name == "assert_visible":
             timeout = _optional_number_argument(action, "timeout")
             if timeout is None and action.timeout_seconds is not None:
@@ -804,6 +844,14 @@ def _test_name(name: str, asset_id: str) -> str:
     return f"test_{stem or 'recorded_flow'}"
 
 
+def _output_statement(variable_name: str) -> str:
+    prefix = f"__WEB_E2E_OUTPUT__|{variable_name}|"
+    return (
+        f"print({prefix!r} + json.dumps(VARIABLES[{variable_name!r}], "
+        "ensure_ascii=False), flush=True)"
+    )
+
+
 def _required_locator(action: Action) -> Locator:
     if action.locator is None:
         raise ValueError(f"Browser action {action.name!r} requires a locator")
@@ -832,25 +880,40 @@ def _target_expression(action: Action) -> str:
 def _locator_expression(locator: Locator, *, base: str = "page") -> str:
     strategy = locator.strategy.casefold().replace("-", "_")
     if strategy == "role":
-        arguments = [repr(locator.value)]
+        arguments = [_string_expression(locator.value)]
         if locator.name is not None:
-            arguments.append(f"name={locator.name!r}")
+            arguments.append(f"name={_string_expression(locator.name)}")
         arguments.append(f"exact={locator.exact!r}")
         expression = f"{base}.get_by_role({', '.join(arguments)})"
     elif strategy == "label":
-        expression = f"{base}.get_by_label({locator.value!r}, exact={locator.exact!r})"
+        expression = (
+            f"{base}.get_by_label({_string_expression(locator.value)}, "
+            f"exact={locator.exact!r})"
+        )
     elif strategy == "text":
-        expression = f"{base}.get_by_text({locator.value!r}, exact={locator.exact!r})"
+        expression = (
+            f"{base}.get_by_text({_string_expression(locator.value)}, "
+            f"exact={locator.exact!r})"
+        )
     elif strategy == "placeholder":
-        expression = f"{base}.get_by_placeholder({locator.value!r}, exact={locator.exact!r})"
+        expression = (
+            f"{base}.get_by_placeholder({_string_expression(locator.value)}, "
+            f"exact={locator.exact!r})"
+        )
     elif strategy in {"test_id", "testid"}:
-        expression = f"{base}.get_by_test_id({locator.value!r})"
+        expression = f"{base}.get_by_test_id({_string_expression(locator.value)})"
     elif strategy in {"css", "xpath", "selector"}:
-        expression = f"{base}.locator({locator.value!r})"
+        expression = f"{base}.locator({_string_expression(locator.value)})"
     elif strategy in {"alt_text", "alt"}:
-        expression = f"{base}.get_by_alt_text({locator.value!r}, exact={locator.exact!r})"
+        expression = (
+            f"{base}.get_by_alt_text({_string_expression(locator.value)}, "
+            f"exact={locator.exact!r})"
+        )
     elif strategy == "title":
-        expression = f"{base}.get_by_title({locator.value!r}, exact={locator.exact!r})"
+        expression = (
+            f"{base}.get_by_title({_string_expression(locator.value)}, "
+            f"exact={locator.exact!r})"
+        )
     else:
         raise ValueError(f"Unsupported locator strategy: {locator.strategy!r}")
 
@@ -892,7 +955,7 @@ def _select_option_expression(action: Action) -> str:
         values = action.arguments["values"]
         if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
             raise ValueError("select argument 'values' must be a list of strings")
-        return repr(values)
+        return "[" + ", ".join(_string_expression(value) for value in values) + "]"
     for key in ("value", "label", "index"):
         if key not in action.arguments:
             continue
@@ -903,8 +966,10 @@ def _select_option_expression(action: Action) -> str:
         elif not isinstance(value, str):
             raise ValueError(f"select argument {key!r} must be a string")
         if key == "value":
-            return repr(value)
-        return f"{key}={value!r}"
+            return _string_expression(value)
+        if key == "label":
+            return f"label={_string_expression(value)}"
+        return f"index={value!r}"
     raise ValueError("select requires 'value', 'values', 'label', or 'index'")
 
 
@@ -929,7 +994,11 @@ def _string_expression(value: JsonValue) -> str:
     if not isinstance(value, str):
         raise TypeError("Environment-aware values must be strings")
     matches = sorted(
-        [*_ENV_REFERENCE.finditer(value), *_VARIABLE_REFERENCE.finditer(value)],
+        [
+            *_ENV_REFERENCE.finditer(value),
+            *_VARIABLE_REFERENCE.finditer(value),
+            *_INPUT_REFERENCE.finditer(value),
+        ],
         key=lambda match: match.start(),
     )
     if not matches:
@@ -941,6 +1010,8 @@ def _string_expression(value: JsonValue) -> str:
             parts.append(repr(value[cursor : match.start()]))
         if match.re is _ENV_REFERENCE:
             parts.append(f"os.environ[{match.group(1)!r}]")
+        elif match.re is _INPUT_REFERENCE:
+            parts.append(f"str(_input_value({match.group(1)!r}))")
         else:
             parts.append(f"VARIABLES[{match.group(1)!r}]")
         cursor = match.end()
@@ -951,6 +1022,9 @@ def _string_expression(value: JsonValue) -> str:
 
 def _value_expression(value: JsonValue) -> str:
     if isinstance(value, str):
+        input_match = _INPUT_REFERENCE.fullmatch(value)
+        if input_match is not None:
+            return f"_input_value({input_match.group(1)!r})"
         return _string_expression(value)
     if isinstance(value, list):
         return "[" + ", ".join(_value_expression(item) for item in value) + "]"
@@ -1022,6 +1096,29 @@ def _contains_environment_reference(value: JsonValue) -> bool:
     if isinstance(value, dict):
         return any(_contains_environment_reference(item) for item in value.values())
     return False
+
+
+def _contains_input_reference(value: JsonValue) -> bool:
+    if isinstance(value, str):
+        return bool(_INPUT_REFERENCE.search(value))
+    if isinstance(value, list):
+        return any(_contains_input_reference(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_input_reference(item) for item in value.values())
+    return False
+
+
+def _locator_contains_input_reference(locator: Locator | None) -> bool:
+    if locator is None:
+        return False
+    return (
+        bool(_INPUT_REFERENCE.search(locator.value))
+        or bool(locator.name and _INPUT_REFERENCE.search(locator.name))
+        or any(
+            _locator_contains_input_reference(fallback)
+            for fallback in locator.fallbacks
+        )
+    )
 
 
 def _render_generated_variables(

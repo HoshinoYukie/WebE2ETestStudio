@@ -38,6 +38,7 @@ from web_e2e_test_studio.domain import (
     VerificationStatus,
     utc_now,
 )
+from web_e2e_test_studio.input_binding import resolve_action_inputs
 from web_e2e_test_studio.recording import RecordingSession
 
 
@@ -147,12 +148,14 @@ class ExecutionRunner:
         actions: ActionRegistry,
         record_sink: Callable[[ExecutionRecord], None] | None = None,
         cancellation: CancellationToken | None = None,
+        inputs: dict[str, JsonValue] | None = None,
     ) -> None:
         self._observer = observer
         self._verifier = verifier
         self._actions = actions
         self._record_sink = record_sink
         self._cancellation = cancellation or CancellationToken()
+        self._inputs = inputs or {}
 
     def run(
         self,
@@ -188,6 +191,7 @@ class ExecutionRunner:
                 source=source,
             )
             before = current_observation or Observation()
+            execution_action = resolve_action_inputs(task.action, self._inputs)
             try:
                 if current_observation is None:
                     before = self._observe()
@@ -197,7 +201,7 @@ class ExecutionRunner:
                     _action_timeout_seconds(task.action),
                 )
                 result = self._actions.execute(
-                    task.action,
+                    execution_action,
                     control,
                     allow_user_initiated=source is StepSource.USER,
                 )
@@ -251,7 +255,7 @@ class ExecutionRunner:
                 stage = "verification"
                 try:
                     verification = self._verifier.verify(
-                        task.action,
+                        execution_action,
                         result,
                         before,
                         after,

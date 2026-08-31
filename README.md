@@ -1,5 +1,26 @@
 # Web E2E Test Studio
 
+## Markdown business workflows
+
+Business-facing forms can now persist their values into a `*.workflow.md`
+document. The document combines an editable YAML `data` map with conditional
+business stages and human-readable knowledge recovered from existing test
+assets. Studio compiles it into a Playwright Authoring Run, then keeps the
+existing deterministic `TestAsset -> plain pytest` export path.
+
+```powershell
+.\.venv\Scripts\web-e2e-studio.exe workflow compile examples\basic_navigation.workflow.md
+.\.venv\Scripts\web-e2e-studio.exe workflow update examples\basic_navigation.workflow.md --set expected_heading="Example Domain"
+.\.venv\Scripts\web-e2e-studio.exe workflow run examples\basic_navigation.workflow.md --output-dir recordings
+```
+
+Deployment URLs and passwords use `${ENV:NAME}` and are not stored as plaintext
+in exported assets. See [the workflow format](docs/markdown-workflows.md).
+
+Domain workflows, including the B2 contract workflow, are use-case assets under
+`examples`; they are not product capabilities and are not imported by the
+Studio runtime.
+
 这是一个以 Python、PyTest 和 Playwright 为基础的多能力测试 Agent。它参考
 Midscene Core 的 Agent 分层与执行闭环，并结合本地 `vlm-studio` 的产品目标：
 

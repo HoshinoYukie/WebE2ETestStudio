@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="api-tools.css">
   <link rel="stylesheet" href="live-browser.css">
   <link rel="stylesheet" href="layout-fixes.css">
+  <link rel="stylesheet" href="environment.css">
 </head>
 <body>
   <div class="shell">
@@ -17,6 +18,7 @@
       <div class="title" id="sessionTitle">New test</div>
       <div class="top-actions">
         <span class="status" id="status"><i></i> Ready</span>
+        <button class="quiet" id="environmentSettings">Environment</button>
         <button class="quiet" id="modelSettings">Model settings</button>
         <button class="quiet" id="syncButton">Sync manual</button>
         <button class="quiet validate" id="validateButton" disabled>Validate without model</button>
@@ -80,6 +82,17 @@
             </div>
           </div>
           <div class="tab-panel" id="capabilitiesPanel">
+            <div class="tool-box workflow-box">
+              <label>Markdown business workflow</label>
+              <select id="workflowPath"><option value="">Choose a *.workflow.md template</option></select>
+              <button class="wide" id="loadWorkflow">Load form data</button>
+              <textarea id="workflowData" rows="12" spellcheck="false"
+                placeholder="Workflow data appears here as JSON"></textarea>
+              <button class="wide primary" id="saveWorkflowData">Save data to Markdown</button>
+              <button class="wide" id="previewWorkflow">Validate & preview stages</button>
+              <button class="wide primary" id="runWorkflow">Run with Playwright</button>
+              <small>The form edits only the YAML data map. Markdown rules and recovered business notes are preserved; execution records a TestAsset and exports stable Playwright pytest.</small>
+            </div>
             <div class="tool-box variable-box">
               <label>Generated variables</label>
               <input id="variableName" placeholder="Variable name, e.g. order_id">
@@ -215,6 +228,31 @@
       <p class="security-note">API Key 仅写入当前 Desktop 进程内存，不会进入测试资产或导出的 PyTest。</p>
       <div class="dialog-actions"><button type="button" id="checkModel" class="quiet">Check connection</button><button value="cancel" class="quiet">Cancel</button><button value="save" class="primary">Save and verify</button></div>
     </form>
+  </dialog>
+  <dialog id="environmentDialog">
+    <div class="environment-dialog-body">
+      <div class="dialog-head">
+        <div><small>RUNTIME AND CONFIGURATION</small><h2>Environment</h2></div>
+        <button type="button" id="closeEnvironment">×</button>
+      </div>
+      <p class="security-note">Runtime checks are product-wide. Variables use one generic KEY=VALUE configuration; secret-shaped names are only masked when displayed.</p>
+      <div class="environment-section">
+        <div class="section-label">Runtime components</div>
+        <div id="environmentChecks" class="environment-list"></div>
+        <button type="button" class="primary" id="installChromium" hidden>Install Chromium</button>
+      </div>
+      <div class="environment-section">
+        <div class="section-label">Environment variables</div>
+        <small id="environmentPath"></small>
+        <div id="environmentVariables" class="environment-list"></div>
+        <form id="environmentVariableForm" class="environment-variable-form">
+          <label>Name<input name="variable_name" required placeholder="VARIABLE_NAME" autocomplete="off"></label>
+          <label>Value<input name="value" placeholder="Value" autocomplete="off"></label>
+          <button type="submit" class="primary">Save variable</button>
+        </form>
+      </div>
+      <div class="dialog-actions"><button type="button" class="quiet" id="doneEnvironment">Done</button></div>
+    </div>
   </dialog>
   <dialog id="historyDialog">
     <form method="dialog">

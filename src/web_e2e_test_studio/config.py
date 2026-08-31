@@ -11,13 +11,22 @@ from tempfile import NamedTemporaryFile
 
 def load_dotenv(path: str | Path, *, override: bool = False) -> set[str]:
     """Load simple KEY=VALUE entries without making dotenv a runtime dependency."""
+    loaded: set[str] = set()
+    for name, value in read_dotenv(path).items():
+        if override or name not in os.environ:
+            os.environ[name] = value
+            loaded.add(name)
+    return loaded
+
+
+def read_dotenv(path: str | Path) -> dict[str, str]:
+    """Read simple KEY=VALUE entries without changing the process environment."""
     source = Path(path)
     if not source.is_file():
-        return set()
-    loaded: set[str] = set()
+        return {}
+    values: dict[str, str] = {}
     for line_number, raw_line in enumerate(
-        source.read_text(encoding="utf-8-sig").splitlines(),
-        start=1,
+        source.read_text(encoding="utf-8-sig").splitlines(), start=1
     ):
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -35,10 +44,8 @@ def load_dotenv(path: str | Path, *, override: bool = False) -> set[str]:
                 f"Invalid .env variable at {source}:{line_number}"
             )
         value = _dotenv_value(raw_value.strip())
-        if override or name not in os.environ:
-            os.environ[name] = value
-            loaded.add(name)
-    return loaded
+        values[name] = value
+    return values
 
 
 def configure_playwright_browsers(
@@ -117,4 +124,9 @@ def _dotenv_value(value: str) -> str:
     return value[:comment].rstrip() if comment >= 0 else value
 
 
-__all__ = ["configure_playwright_browsers", "load_dotenv", "update_dotenv"]
+__all__ = [
+    "configure_playwright_browsers",
+    "load_dotenv",
+    "read_dotenv",
+    "update_dotenv",
+]

@@ -35,6 +35,19 @@ UIContext + user goal + previous ExecutionDump
                               deterministic Pytest
 ```
 
+Markdown workflows add an upstream authoring and publication seam:
+
+```text
+large-path *.workflow.md -> condition/template compiler
+          -> Playwright Authoring Run -> parameterized TestAsset
+          -> standalone deterministic Pytest
+```
+
+Domain-specific knowledge lives in use-case-owned Markdown templates. The
+compiler understands only the generic workflow schema, `${INPUT:path}`
+bindings, and registered Action contracts. A consuming WebTool passes runtime
+data directly to the exported Python; it does not call Studio.
+
 Before a browser action is performed, `LocatorEngine` expands the requested
 locator and its fallbacks with candidates derived from the current
 `Observation`. It probes every candidate without side effects, rejects missing
